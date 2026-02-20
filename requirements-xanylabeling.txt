@@ -1,0 +1,20 @@
+# X-AnyLabeling Client (.venv_client) requirements
+# Python 3.12+ required
+#
+# IMPORTANT: Client uses a SEPARATE venv from the server
+# to avoid CUDA DLL conflicts (WinError 1114)
+#
+# Install:
+#   python -m venv .venv_client
+#   .venv_client\Scripts\pip.exe install -r requirements-xanylabeling.txt
+#
+# Run:
+#   .venv_client\Scripts\xanylabeling.exe
+
+# === Core ===
+x-anylabeling-cvhub>=3.3.9
+
+# === IMPORTANT: numpy must be <=1.26.4 ===
+# x-anylabeling-cvhub requires numpy<=1.26.4
+# Do NOT install torch/torchvision here (causes DLL conflicts)
+numpy<=1.26.4

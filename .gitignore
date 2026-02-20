@@ -1,0 +1,46 @@
+# 가상환경 (용량 크므로 제외)
+.venv/
+.venv_client/
+
+# 모델 파일 (용량 매우 큼)
+*.pt
+*.pth
+*.onnx
+*.gz
+
+# 로그
+X-AnyLabeling-Server/logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 캐시
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 임시 파일
+create_shortcuts.ps1
+
+# 클로드 개인 설정/메모리
+.claude/
+
+# X-AnyLabeling-Server (별도 git repo, submodule 아님)
+X-AnyLabeling-Server/
+
+# 기타 하위 폴더
+src/
+PRPs/
+nul
+triton-*.whl
+pyproject.toml
+Project_Status.md
