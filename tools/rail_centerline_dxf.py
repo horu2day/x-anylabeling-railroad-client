@@ -15,7 +15,7 @@ from collections import defaultdict
 # ── 설정 ──────────────────────────────────────────
 SRC_TIF  = "drone_2cm/22)조치원(STA.127+570~131+300).tif"
 MODEL_PT = "runs/segment/output/yolo_train_2cm/rail_seg_v2/weights/best.pt"
-OUT_DXF  = "output/rail_centerline_2cm.dxf"
+OUT_DXF  = "output/rail_centerline_2cm_polygon.dxf"
 TILE     = 1024
 OVERLAP  = 128
 STEP     = TILE - OVERLAP
@@ -137,25 +137,20 @@ for ty in ys_range:
         sx = tw / w_r
         sy = th / h_r
 
-        for mask in masks:
-            pts_local = extract_centerline_points(mask)
-            if len(pts_local) < 2:
+        for xy in results[0].masks.xy:
+            if len(xy) < 2:
                 continue
-
-            # 겹침 영역(overlap) 가장자리 점 제거 (타일 이음새 중복 방지)
-            pts_filtered = []
-            for lx, ly in pts_local:
+            pts_world = []
+            for lx, ly in xy:
                 px_global = tx + lx * sx
                 py_global = ty + ly * sy
-                # 오른쪽/아래 overlap 영역은 다음 타일에서 처리
                 if tx + tw < W and lx * sx > (tw - OVERLAP // 2):
                     continue
                 if ty + th < H and ly * sy > (th - OVERLAP // 2):
                     continue
-                pts_filtered.append(pixel_to_world(px_global, py_global))
-
-            if len(pts_filtered) >= 2:
-                msp.add_lwpolyline(pts_filtered, dxfattribs={"layer": "RAIL_CENTERLINE"})
+                pts_world.append(pixel_to_world(px_global, py_global))
+            if len(pts_world) >= 2:
+                msp.add_lwpolyline(pts_world, dxfattribs={"layer": "RAIL_CENTERLINE"})
                 total_polylines += 1
 
         processed += 1
