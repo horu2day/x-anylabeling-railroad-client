@@ -37,7 +37,16 @@ create_shortcuts.ps1
 # X-AnyLabeling-Server (별도 git repo, submodule 아님)
 X-AnyLabeling-Server/
 
-# 기타 하위 폴더
+# 용량 큰 데이터/결과 폴더
+drone_2cm/
+output/
+runs/
+
+# 용량 큰 원본 영상 파일
+*.tif
+경부선_2-2구간_미션33-34(5cm).png
+
+# 기타
 src/
 PRPs/
 nul
