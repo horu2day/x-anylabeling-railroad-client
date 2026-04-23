@@ -1,0 +1,115 @@
+# ============================================================
+# VLM + SAM3 Railway Object Detection Pipeline Configuration
+# ============================================================
+
+# --- Pipeline Mode ---
+# "sequential": VLM first → unload → SAM3 (saves VRAM, for ≤12GB GPU)
+# "concurrent": VLM + SAM3 loaded together (needs ≥16GB GPU)
+# "api_vlm":    API-based VLM + local SAM3 (minimal local VRAM)
+pipeline_mode: "sequential"
+
+# --- VLM Configuration ---
+vlm:
+  # Backend: "florence2", "qwen2.5vl", "claude", "openai"
+  backend: "florence2"
+
+  florence2:
+    model_id: "microsoft/Florence-2-large"
+    # Task types: "<OD>" (detection), "<CAPTION_TO_PHRASE_GROUNDING>" (grounding),
+    #             "<DENSE_REGION_CAPTION>" (region captions), "<OCR>" (text)
+    task: "<CAPTION_TO_PHRASE_GROUNDING>"
+    device: "cuda:0"
+    dtype: "float16"       # float16 saves ~50% VRAM vs float32
+    max_new_tokens: 1024
+
+  qwen2_5vl:
+    model_id: "Qwen/Qwen2.5-VL-3B-Instruct"
+    device: "cuda:0"
+    dtype: "bfloat16"
+    max_new_tokens: 2048
+
+  claude:
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 2048
+    # Set ANTHROPIC_API_KEY environment variable
+
+  openai:
+    model: "gpt-4o"
+    max_tokens: 2048
+    # Set OPENAI_API_KEY environment variable
+
+# --- SAM3 Configuration ---
+sam3:
+  model_path: "D:/MYCLAUDE_PROJECT/x-anylabeling01/X-AnyLabeling-Server/sam3.pt"
+  device: "cuda:0"
+  # Prompt types to use from VLM output:
+  #   "text":  noun phrases → SAM3 concept prompt
+  #   "bbox":  bounding boxes → SAM3 box prompt
+  #   "both":  text + bbox combined (best accuracy)
+  prompt_mode: "both"
+  conf_threshold: 0.25
+  mask_threshold: 0.5
+  max_objects_per_image: 50
+
+# --- Railway Domain ---
+railway:
+  # Target objects for VLM to detect
+  target_objects:
+    - name: "railway track"
+      aliases: ["rail", "railroad track", "train track", "레일"]
+      priority: 1
+    - name: "railway signal"
+      aliases: ["signal light", "train signal", "철도 신호기", "신호등"]
+      priority: 1
+    - name: "catenary pole"
+      aliases: ["electric pole", "전차선 기둥", "전주"]
+      priority: 2
+    - name: "catenary wire"
+      aliases: ["overhead wire", "전차선", "가공전선"]
+      priority: 2
+    - name: "junction box"
+      aliases: ["electrical box", "함체", "접속함"]
+      priority: 3
+    - name: "railroad switch"
+      aliases: ["turnout", "points", "분기기"]
+      priority: 2
+    - name: "sleeper"
+      aliases: ["railroad tie", "crosstie", "침목"]
+      priority: 3
+    - name: "fence"
+      aliases: ["barrier", "railing", "울타리", "방호울타리"]
+      priority: 3
+    - name: "platform"
+      aliases: ["station platform", "승강장"]
+      priority: 3
+
+  # VLM system prompt for scene understanding
+  vlm_system_prompt: |
+    You are a railway infrastructure inspection expert analyzing drone aerial imagery.
+    Identify and locate all railway-related objects visible in this image.
+    For each object, provide:
+    1. Object class name (in English)
+    2. Bounding box coordinates [x_min, y_min, x_max, y_max] as ratios (0.0-1.0)
+    3. Confidence level (high/medium/low)
+    4. Brief description of condition if notable
+
+    Focus on: railway tracks, signals, catenary poles/wires, junction boxes,
+    switches, sleepers, fences, and platforms.
+
+# --- Input/Output ---
+io:
+  input_dir: "D:/MYCLAUDE_PROJECT/x-anylabeling01/노선영상/extracted_frames"
+  output_dir: "D:/MYCLAUDE_PROJECT/x-anylabeling01/vlm_sam3/output"
+  # Output formats
+  save_masks: true           # Save binary masks as PNG
+  save_overlays: true        # Save visualization overlays
+  save_annotations: true     # Save X-AnyLabeling JSON format
+  save_coco: true            # Save COCO format annotations
+  overlay_alpha: 0.4         # Mask overlay transparency
+
+# --- Processing ---
+processing:
+  batch_size: 4              # Images per VLM batch
+  image_extensions: [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"]
+  max_image_size: 2048       # Resize long edge (0 = no resize)
+  num_workers: 2
