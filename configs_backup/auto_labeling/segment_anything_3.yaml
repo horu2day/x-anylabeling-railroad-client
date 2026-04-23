@@ -16,6 +16,10 @@ widgets:
     value: null
   - name: button_send
     value: null
+  - name: button_add_point
+    value: null
+  - name: button_remove_point
+    value: null
   - name: add_pos_rect
     value: null
   - name: add_neg_rect
