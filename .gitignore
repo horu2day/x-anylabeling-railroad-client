@@ -41,6 +41,7 @@ X-AnyLabeling-Server/
 drone_2cm/
 output/
 runs/
+data/
 
 # 용량 큰 원본 영상 파일
 *.tif
@@ -53,3 +54,4 @@ nul
 triton-*.whl
 pyproject.toml
 Project_Status.md
+.usage/
