@@ -56,7 +56,8 @@ PROMPT_SLOPE = (
 )
 
 # 철로 검출용 프롬프트 (railway zone filter에 사용)
-PROMPT_RAIL = "railway track . train rail . railroad track . rail line"
+# ballast(자갈 도상)와 sleeper(침목)를 강조해 도로와 구분
+PROMPT_RAIL = "railroad track with ballast . railway track with gravel . train track with sleepers . railroad ballast"
 
 # 모든 검출 결과 → class 0 (catenary_pole) 단일 클래스
 CLASS_MAP: dict = {}   # 기본값 0 으로 처리 (아래 save_yolo_label 참조)
@@ -220,7 +221,8 @@ def save_yolo_label(label_path: Path, pairs: list, W: int, H: int):
 
 
 # ── 시각화 저장 ───────────────────────────────────────────────────────────────
-def save_vis(vis_path: Path, image_bgr: np.ndarray, pairs: list):
+def save_vis(vis_path: Path, image_bgr: np.ndarray, pairs: list,
+             rail_dets: list = None):
     vis = image_bgr.copy()
     colors = [(0, 200, 255), (255, 180, 0), (0, 255, 100)]
 
@@ -235,6 +237,12 @@ def save_vis(vis_path: Path, image_bgr: np.ndarray, pairs: list):
             cv2.fillPoly(overlay, [pts], (0, 255, 0))
             cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
             cv2.polylines(vis, [pts], True, (0, 255, 0), 1)
+
+    # 철로 bbox 빨간색 표시 (디버그용)
+    for _, _, rx1, ry1, rx2, ry2 in (rail_dets or []):
+        cv2.rectangle(vis, (int(rx1), int(ry1)), (int(rx2), int(ry2)), (0, 0, 255), 2)
+        cv2.putText(vis, "rail", (int(rx1), int(ry1) - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
     # 큰 이미지는 미리보기 크기로 저장
     max_preview = 2048
@@ -382,6 +390,7 @@ def process_image(processor, model, image_path: Path,
         return 0
 
     # 철로 존 필터 (rail_margin < 0 이면 비활성)
+    rail_dets = []
     if rail_margin >= 0:
         print(f"  철로 검출 중 (thresh={rail_thresh})...")
         rail_dets = detect_railway_zone(processor, model, image_bgr, device, rail_thresh)
@@ -400,7 +409,7 @@ def process_image(processor, model, image_path: Path,
     save_yolo_label(label_path, pairs, W, H)
 
     vis_path = out_vis_dir / (image_path.stem + "_vis.jpg")
-    save_vis(vis_path, image_bgr, pairs)
+    save_vis(vis_path, image_bgr, pairs, rail_dets)
 
     return len(pairs)
 
