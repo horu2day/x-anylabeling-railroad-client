@@ -41,11 +41,13 @@ def _load_prompt(filename: str, default: str) -> str:
 
 
 def _get_prompts() -> tuple:
-    """(pole_prompt, rail_prompt) 반환."""
-    pole = _load_prompt("pole.txt",
-                        "railway catenary pole, overhead line support pole, catenary mast")
-    rail = _load_prompt("rail.txt", "railroad, railway")
-    return pole, rail
+    """(pole_prompt, rail_prompt, bracket_prompt) 반환."""
+    pole    = _load_prompt("pole.txt",
+                           "railway catenary pole, overhead line support pole, catenary mast")
+    rail    = _load_prompt("rail.txt", "railroad, railway")
+    bracket = _load_prompt("bracket.txt",
+                           "catenary pole top, pole cross arm, horizontal cantilever beam, bracket arm")
+    return pole, rail, bracket
 
 
 # ── 이미지 인코딩 ──────────────────────────────────────────────────────────────
@@ -184,12 +186,33 @@ def build_zone_mask(shapes: list, H: int, W: int, margin: int,
 
 
 def pole_in_zone(pole_det: tuple, zone_mask: np.ndarray) -> bool:
-    """전철주 bbox 중심이 zone_mask 내부이면 True."""
+    """전철주 bbox 중심 열(column)의 y1~y2 범위 중 zone_mask와 교차하면 True.
+    기둥은 철로 근처에 기저부를 두고 위/아래로 뻗으므로
+    중심 한 점 대신 세로 전체 범위로 판단."""
     _, _, x1, y1, x2, y2 = pole_det
     H, W = zone_mask.shape
     cx = int(max(0, min((x1 + x2) / 2, W - 1)))
-    cy = int(max(0, min((y1 + y2) / 2, H - 1)))
-    return bool(zone_mask[cy, cx])
+    ys = int(max(0, y1))
+    ye = int(min(H, y2 + 1))
+    return bool(zone_mask[ys:ye, cx].any())
+
+
+def _filter_pole_has_beam(pole_pairs: list, beam_pairs: list) -> list:
+    """A ∩ C: 전철주 bbox와 겹치는 Beam/Arm이 하나라도 있는 기둥만 유지.
+    Beam/Arm bbox와 기둥 bbox의 IoU > 0 (단순 교차)으로 판단."""
+    beam_boxes = [(x1, y1, x2, y2)
+                  for (_, _, x1, y1, x2, y2), _ in beam_pairs]
+
+    def overlaps_any_beam(pole_det):
+        _, _, px1, py1, px2, py2 = pole_det
+        for bx1, by1, bx2, by2 in beam_boxes:
+            ix1 = max(px1, bx1); iy1 = max(py1, by1)
+            ix2 = min(px2, bx2); iy2 = min(py2, by2)
+            if ix2 > ix1 and iy2 > iy1:
+                return True
+        return False
+
+    return [(d, s) for d, s in pole_pairs if overlaps_any_beam(d)]
 
 
 # ── 저장 ──────────────────────────────────────────────────────────────────────
@@ -222,13 +245,7 @@ def save_vis(vis_path: Path, image_bgr: np.ndarray, pairs: list,
             cv2.putText(vis, f"{CLASS_NAMES[cls_id]} {conf:.2f}",
                         (int(x1), max(0, int(y1) - 5)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-    for s in (rail_shapes or []):
-        if s.get("shape_type") == "polygon":
-            pts = np.array(s["points"], dtype=np.int32)
-            overlay = vis.copy()
-            cv2.fillPoly(overlay, [pts], (0, 0, 255))
-            cv2.addWeighted(overlay, 0.15, vis, 0.85, 0, vis)
-            cv2.polylines(vis, [pts], True, (0, 0, 255), 2)
+    # 레일 시각화 비활성 (rail_shapes 파라미터 유지, 표시 안 함)
     h, w = vis.shape[:2]
     if max(h, w) > 2048:
         scale = 2048 / max(h, w)
@@ -275,7 +292,7 @@ def process_image(image_path: Path,
         return 0
     H, W = image_bgr.shape[:2]
 
-    pole_prompt, rail_prompt = _get_prompts()
+    pole_prompt, rail_prompt, bracket_prompt = _get_prompts()
     use_tile = tile_size > 0 and (W > tile_size or H > tile_size)
 
     # A: 전철주 검출
@@ -299,16 +316,24 @@ def process_image(image_path: Path,
     rail_shapes = [s for s in sam3_text_segment(image_bgr, rail_prompt, sam3_conf)
                    if s.get("shape_type") == "polygon"]
 
-    # A ∩ B: 철로 zone 필터
+    # A ∩ B: 철로 zone 필터 (기둥 기저부 y2 기준)
     if rail_margin >= 0:
         if rail_shapes:
             zone_mask = build_zone_mask(rail_shapes, H, W, rail_margin, rail_gap_close)
             before = len(pole_pairs)
             pole_pairs = [(d, s) for d, s in pole_pairs if pole_in_zone(d, zone_mask)]
-            print(f"  [A∩B] 철로 zone 필터(+{rail_margin}px): {before}→{len(pole_pairs)}개")
+            print(f"  [A∩B] 철로 zone 필터(+{rail_margin}px, y2기준): {before}→{len(pole_pairs)}개")
         else:
             print(f"  ! [B] 철로 미검출 → 전체 제외")
             pole_pairs = []
+
+    # C: Beam/Arm 검출 → 겹침 여부 로그만 (하드 필터 아님)
+    # SAM3 beam 검출이 기둥과 다른 위치에 나올 수 있어 필터로 사용 시 미탐 발생
+    if pole_pairs and bracket_prompt:
+        print(f"  [C] Beam/Arm 검출: '{bracket_prompt}'")
+        beam_pairs = nms(shapes_to_pairs(sam3_text_segment(image_bgr, bracket_prompt, sam3_conf)))
+        matched = len(_filter_pole_has_beam(pole_pairs, beam_pairs)) if beam_pairs else 0
+        print(f"  [C] Beam/Arm {len(beam_pairs)}개 검출, 기둥 겹침 {matched}/{len(pole_pairs)}개 (필터 미적용)")
 
     if not pole_pairs:
         return 0
@@ -356,7 +381,7 @@ def main():
     else:
         images = [input_path]
 
-    pole_prompt, rail_prompt = _get_prompts()
+    pole_prompt, rail_prompt, bracket_prompt = _get_prompts()
     print(f"처리 대상: {len(images)}장")
     print(f"전철주 프롬프트: {pole_prompt}")
     print(f"철로 프롬프트:   {rail_prompt}")
