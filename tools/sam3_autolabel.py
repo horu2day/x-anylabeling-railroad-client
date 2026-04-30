@@ -281,7 +281,7 @@ def process_image(image_path: Path,
                   out_label_dir: Path, out_vis_dir: Path,
                   sam3_conf: float,
                   tile_size: int, tile_overlap: float,
-                  min_pole_h: int = 180,
+                  min_pole_h: int = 160,
                   rail_margin: int = 300,
                   rail_gap_close: int = 500) -> int:
 
@@ -359,8 +359,8 @@ def main():
     parser.add_argument("--tile_size",      type=int,   default=1280,
                         help="타일 크기 px (0=타일 없음, 기본:1280)")
     parser.add_argument("--tile_overlap",   type=float, default=0.2)
-    parser.add_argument("--min_pole_h",     type=int,   default=180,
-                        help="전철주 최소 높이 px (기본:180)")
+    parser.add_argument("--min_pole_h",     type=int,   default=160,
+                        help="전철주 최소 높이 px (기본:160, 드론 거리 변화 마진 포함)")
     parser.add_argument("--rail_margin",    type=int,   default=300,
                         help="철로 mask 팽창 거리 px (-1=비활성, 기본:300)")
     parser.add_argument("--rail_gap_close", type=int,   default=500,
