@@ -47,6 +47,17 @@ data/
 *.tif
 경부선_2-2구간_미션33-34(5cm).png
 
+# 논문/문서 파일
+*.pdf
+*.txt
+
+# 미정리 툴 (작업 중)
+tools/render_polygons_rainbow.py
+tools/render_skeleton_overlay.py
+tools/render_yolo_labels.py
+tools/sam3_sleeper_detect.py
+tools/tif_hollow_detect.py
+
 # 기타
 src/
 PRPs/
