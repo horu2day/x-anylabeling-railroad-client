@@ -1,4 +1,2 @@
-catenary pole top
-pole cross arm
-horizontal cantilever beam
-bracket arm
+overhead catenary portal frame
+railway gantry beam
