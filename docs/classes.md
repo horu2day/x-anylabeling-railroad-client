@@ -14,6 +14,13 @@
 | `bracket` | 브라켓/암 | catenary pole top, horizontal cantilever beam, bracket arm | 전철주 상단 가로 암 |
 | `wire` | 전선/가선 | overhead wire, catenary wire, electric cable line | 가공 전선 |
 | `bridge` | 교량/교각 | bridge, overpass, viaduct | 철도·도로 교량 포함 |
+| `sleeper` | 침목 | railway sleeper, concrete sleeper, railroad tie, wooden tie, rail tie | 레일 하부 횡방향 지지대 |
+| `ballast` | 자갈도상 | railway ballast, track ballast, gravel between rails | 레일 사이·하부 자갈층 |
+| `fence` | 팬스/울타리 | railway fence, trackside fence, perimeter fence, chain link fence | 선로 경계 울타리 |
+| `control_box` | 컨트롤박스 | railway control box, electrical cabinet, trackside signal box, relay box | 선로변 신호·전기 제어함 |
+| `retaining_wall` | 방음벽/옹벽 | retaining wall, noise barrier, sound barrier, railway fence wall | 선로 측면 보호 구조물 |
+| `service_road` | 유지보수 도로 | railway service road, maintenance road, unpaved track side road | 선로 옆 비포장 작업도로 |
+| `culvert` | 암거/소교량 | culvert, railway underpass, small bridge tunnel, drainage culvert | 소형 지하 통로·암거 |
 
 ## 도로 인프라
 
@@ -38,4 +45,4 @@
 
 ---
 
-_총 11개 클래스 (2026-05-08 기준)_
+_총 18개 클래스 (2026-05-08 기준)_

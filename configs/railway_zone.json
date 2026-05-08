@@ -1,0 +1,143 @@
+{
+  "_comment": "철도 구간 집중 검출용 카테고리 설정 (타일 9-24 기준)",
+  "_conf_note": "conf: 클래스별 신뢰도 임계값. priority: 낮을수록 cross-class NMS에서 우선 보존(화면 위에 표시).",
+  "_priority_order": "2=컨트롤박스 > 3=전철주 > 4=팬스 > 5=레일 > 6=침목 > 7=자갈(맨 밑)",
+  "cross_class_nms_iou": 0.45,
+  "categories": [
+    {
+      "name": "control_box",
+      "name_kr": "컨트롤박스",
+      "prompt": "railway control box, electrical cabinet, trackside signal box, equipment cabinet, relay box",
+      "keywords": ["control box", "electrical cabinet", "signal box", "relay box", "equipment box"],
+      "color_bgr": [255, 255, 0],
+      "conf": 0.20,
+      "priority": 2
+    },
+    {
+      "name": "catenary_pole",
+      "name_kr": "전철주",
+      "prompt": "railway catenary pole, overhead line pole, catenary mast, electric railway pole",
+      "keywords": ["catenary pole", "overhead line pole", "catenary mast", "railway pole"],
+      "color_bgr": [255, 0, 255],
+      "conf": 0.25,
+      "priority": 3
+    },
+    {
+      "name": "fence",
+      "name_kr": "팬스/울타리",
+      "prompt": "railway fence, trackside fence, perimeter fence, chain link fence, railway boundary fence",
+      "keywords": ["fence", "chain link", "perimeter fence", "boundary fence"],
+      "color_bgr": [0, 255, 0],
+      "conf": 0.50,
+      "priority": 5
+    },
+    {
+      "name": "railway",
+      "name_kr": "철도 레일",
+      "prompt": "two parallel steel rails, narrow metallic longitudinal beam, shiny steel rail line on sleeper",
+      "keywords": ["railroad", "railway rail", "steel rail", "train track", "parallel rail"],
+      "color_bgr": [0, 0, 255],
+      "conf": 0.30,
+      "priority": 4
+    },
+    {
+      "name": "sleeper",
+      "name_kr": "침목",
+      "prompt": "rectangular concrete sleeper, dark crosswise tie, evenly spaced railroad tie perpendicular to rail, concrete slab between ballast",
+      "keywords": ["sleeper", "railroad tie", "rail tie", "wooden tie", "concrete tie", "crosswise tie"],
+      "color_bgr": [0, 128, 255],
+      "conf": 0.20,
+      "priority": 6
+    },
+    {
+      "name": "ballast",
+      "name_kr": "자갈도상",
+      "prompt": "crushed gray stone gravel, railway ballast aggregate, coarse gravel track bed, angular stone between rails",
+      "keywords": ["ballast", "gravel between rails", "track bed", "crushed stone", "aggregate"],
+      "color_bgr": [30, 50, 100],
+      "conf": 0.20,
+      "priority": 7
+    },
+    {
+      "name": "bracket",
+      "name_kr": "브라켓/암",
+      "prompt": "catenary bracket arm, horizontal cantilever arm, pole cross arm, overhead wire bracket",
+      "keywords": ["bracket", "cantilever", "cross arm"],
+      "color_bgr": [0, 80, 200],
+      "conf": 0.20,
+      "priority": 8
+    },
+    {
+      "name": "bridge",
+      "name_kr": "교량/교각",
+      "prompt": "railway bridge, road bridge, overpass, viaduct, concrete bridge structure",
+      "keywords": ["bridge", "overpass", "viaduct"],
+      "color_bgr": [0, 165, 255],
+      "conf": 0.25,
+      "priority": 8
+    },
+    {
+      "name": "retaining_wall",
+      "name_kr": "방음벽/옹벽",
+      "prompt": "railway retaining wall, noise barrier wall, sound barrier, concrete embankment wall",
+      "keywords": ["retaining wall", "noise barrier", "sound barrier", "embankment wall"],
+      "color_bgr": [60, 180, 60],
+      "conf": 0.25,
+      "priority": 9
+    },
+    {
+      "name": "service_road",
+      "name_kr": "유지보수 도로",
+      "prompt": "railway maintenance road, service road alongside track, unpaved railway access road",
+      "keywords": ["service road", "maintenance road", "access road"],
+      "color_bgr": [80, 120, 160],
+      "conf": 0.30,
+      "priority": 10
+    },
+    {
+      "name": "culvert",
+      "name_kr": "암거/소교량",
+      "prompt": "railway culvert, drainage culvert, small underpass tunnel, concrete drainage structure",
+      "keywords": ["culvert", "underpass", "drainage tunnel"],
+      "color_bgr": [180, 60, 180],
+      "conf": 0.20,
+      "priority": 9
+    },
+    {
+      "name": "vehicle",
+      "name_kr": "차량",
+      "prompt": "car, truck, vehicle, automobile, van",
+      "keywords": ["car", "truck", "vehicle", "automobile", "van"],
+      "color_bgr": [255, 255, 255],
+      "conf": 0.25,
+      "priority": 2
+    },
+    {
+      "name": "building",
+      "name_kr": "건물",
+      "prompt": "building, house, rooftop, structure, roof",
+      "keywords": ["building", "house", "rooftop", "structure", "roof"],
+      "color_bgr": [50, 50, 255],
+      "conf": 0.25,
+      "priority": 8
+    },
+    {
+      "name": "farmland",
+      "name_kr": "농지",
+      "prompt": "farmland, agricultural field, cropland, vegetable garden",
+      "keywords": ["farmland", "field", "cropland", "vegetable", "agricultural"],
+      "color_bgr": [50, 200, 50],
+      "conf": 0.25,
+      "priority": 11
+    },
+    {
+      "name": "vegetation",
+      "name_kr": "식생",
+      "prompt": "trees, forest, shrubs, vegetation, bushes",
+      "keywords": ["tree", "forest", "shrub", "vegetation", "bush"],
+      "color_bgr": [0, 120, 0],
+      "conf": 0.25,
+      "priority": 12
+    }
+  ]
+}
