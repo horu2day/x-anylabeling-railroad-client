@@ -37,7 +37,7 @@
       "prompt": "two parallel steel rails, narrow metallic longitudinal beam, shiny steel rail line on sleeper",
       "keywords": ["railroad", "railway rail", "steel rail", "train track", "parallel rail"],
       "color_bgr": [0, 0, 255],
-      "conf": 0.30,
+      "conf": 0.25,
       "priority": 4
     },
     {
