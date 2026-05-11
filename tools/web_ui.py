@@ -110,12 +110,12 @@ async def api_preview(data: dict):
 async def api_detect(data: dict):
     job_id = str(uuid.uuid4())[:8]
     q: queue.Queue = queue.Queue()
-    jobs[job_id] = {"queue": q, "status": "running", "result_path": None}
+    jobs[job_id] = {"queue": q, "status": "running", "result_path": None, "proc": None}
 
     def run():
         tiles_str = tiles_from_rows(data.get("selected_rows", []), data.get("cols", 8))
         cmd = [
-            sys.executable, str(ROOT / "tools" / "detect_all_objects.py"),
+            sys.executable, "-u", str(ROOT / "tools" / "detect_all_objects.py"),
             "--input",      data["image_path"],
             "--categories", data.get("categories", "configs/railway_zone.json"),
             "--tiles",      tiles_str,
@@ -128,22 +128,27 @@ async def api_detect(data: dict):
         if data.get("debug"):
             cmd.append("--debug")
 
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
-                env=env, cwd=str(ROOT),
+                env=env, cwd=str(ROOT), creationflags=flags,
             )
-            for line in proc.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                q.put(("log", line))
-                if line.startswith("저장:"):
-                    jobs[job_id]["result_path"] = line.replace("저장:", "").strip()
+            jobs[job_id]["proc"] = proc
+            for raw in proc.stdout:
+                for line in raw.replace("\r", "\n").split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    q.put(("log", line))
+                    if line.startswith("저장:"):
+                        jobs[job_id]["result_path"] = line.replace("저장:", "").strip()
             proc.wait()
-            if proc.returncode == 0:
+            if jobs[job_id]["status"] == "stopped":
+                q.put(("error", "사용자가 중지했습니다"))
+            elif proc.returncode == 0:
                 q.put(("done", jobs[job_id]["result_path"] or "완료"))
                 jobs[job_id]["status"] = "done"
             else:
@@ -155,6 +160,22 @@ async def api_detect(data: dict):
 
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id}
+
+
+@app.post("/api/stop/{job_id}")
+async def api_stop(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return {"ok": False, "error": "not found"}
+    job["status"] = "stopped"
+    proc = job.get("proc")
+    if proc and proc.poll() is None:
+        if os.name == "nt":
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            proc.terminate()
+    return {"ok": True}
 
 
 @app.get("/api/progress/{job_id}")
@@ -254,6 +275,9 @@ input[type=text]:focus,input[type=number]:focus{outline:none;border-color:#e9456
 .btn-run{background:#e94560;color:#fff;border:none;padding:11px;border-radius:6px;cursor:pointer;font-size:.98rem;font-weight:700;width:100%;margin-top:2px;transition:background .2s}
 .btn-run:hover{background:#c73652}
 .btn-run:disabled{background:#555;cursor:not-allowed}
+.btn-stop{background:#555;color:#fff;border:none;padding:11px;border-radius:6px;cursor:pointer;font-size:.98rem;font-weight:700;width:100%;margin-top:2px;display:none}
+.btn-stop.visible{display:block}
+.btn-stop:hover{background:#c73652}
 
 /* 결과 탭 */
 #tab-result{flex-direction:column}
@@ -317,7 +341,8 @@ input[type=text]:focus,input[type=number]:focus{outline:none;border-color:#e9456
       <input type="checkbox" id="debug"> Debug 이미지 저장
     </label>
 
-    <button class="btn-run" id="btn-run" onclick="startDetect()">&#x25B6; 검출 시작</button>
+    <button class="btn-run"  id="btn-run"  onclick="startDetect()">&#x25B6; 검출 시작</button>
+    <button class="btn-stop" id="btn-stop" onclick="stopDetect()">&#x25A0; 중지</button>
 
   </div>
 
@@ -411,6 +436,7 @@ async function startDetect() {
   if (!imgPath) { alert('이미지 경로를 입력하세요'); return; }
 
   document.getElementById('btn-run').disabled = true;
+  document.getElementById('btn-stop').classList.add('visible');
   document.getElementById('prog-fill').style.width = '0%';
   document.getElementById('prog-log').textContent = '시작 중...';
 
@@ -444,15 +470,15 @@ function listenProgress(jobId) {
       es.close();
       document.getElementById('prog-fill').style.width = '100%';
       document.getElementById('prog-log').textContent = '완료! 결과 탭으로 이동합니다.';
-      document.getElementById('btn-run').disabled = false;
+      setRunning(false);
       await showResult(jobId);
     } else if (type === 'error') {
       es.close();
-      document.getElementById('prog-log').textContent = '오류: ' + msg;
-      document.getElementById('btn-run').disabled = false;
+      document.getElementById('prog-log').textContent = msg;
+      setRunning(false);
     }
   };
-  es.onerror = () => { es.close(); document.getElementById('btn-run').disabled = false; };
+  es.onerror = () => { es.close(); setRunning(false); };
 }
 
 // ── 결과 표시
@@ -504,6 +530,19 @@ function resetZoom() {
   tx = (vw - rimg.naturalWidth  * sc) / 2;
   ty = (vh - rimg.naturalHeight * sc) / 2;
   applyT();
+}
+
+// ── 중지
+let currentES = null;
+async function stopDetect() {
+  if (!currentJobId) return;
+  await post('/api/stop/' + currentJobId, {});
+  document.getElementById('prog-log').textContent = '중지 요청됨...';
+}
+
+function setRunning(on) {
+  document.getElementById('btn-run').disabled = on;
+  document.getElementById('btn-stop').classList.toggle('visible', on);
 }
 
 // ── 폴더 열기
