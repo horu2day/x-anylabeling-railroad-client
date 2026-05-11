@@ -215,7 +215,7 @@ def cross_class_nms(buckets: list, categories: list, iou_thresh: float) -> list:
 # ── 타일 그리드 검출 (병렬) ───────────────────────────────────────────────────
 def detect_tiled(image_bgr: np.ndarray, cols: int, rows: int, overlap: float,
                  conf: float, workers: int, tile_filter: set,
-                 prompt: str) -> list:
+                 prompt: str, border_pad: int = 0) -> list:
     H, W   = image_bgr.shape[:2]
     base_w = W / cols
     base_h = H / rows
@@ -240,10 +240,38 @@ def detect_tiled(image_bgr: np.ndarray, cols: int, rows: int, overlap: float,
 
     def process(args):
         idx, x0, y0, x1, y1 = args
-        tile   = image_bgr[y0:y1, x0:x1]
-        shapes = sam3_segment_tile(tile, prompt, conf)
+
+        if border_pad > 0:
+            # 실제 이미지에서 최대한 확장 (경계 초과분은 검정으로 채움)
+            ext_x0 = max(0, x0 - border_pad)
+            ext_y0 = max(0, y0 - border_pad)
+            ext_x1 = min(W, x1 + border_pad)
+            ext_y1 = min(H, y1 + border_pad)
+            left_pad = x0 - ext_x0   # 실제로 확보된 왼쪽 픽셀 수 (≤ border_pad)
+            top_pad  = y0 - ext_y0
+
+            canvas_h = (y1 - y0) + 2 * border_pad
+            canvas_w = (x1 - x0) + 2 * border_pad
+            canvas   = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+
+            dst_y = border_pad - top_pad
+            dst_x = border_pad - left_pad
+            src   = image_bgr[ext_y0:ext_y1, ext_x0:ext_x1]
+            canvas[dst_y:dst_y + src.shape[0], dst_x:dst_x + src.shape[1]] = src
+
+            # 캔버스 좌표 → 이미지 좌표 오프셋
+            off_x = x0 - border_pad
+            off_y = y0 - border_pad
+            tile_to_send = canvas
+        else:
+            tile_to_send = image_bgr[y0:y1, x0:x1]
+            off_x, off_y = x0, y0
+
+        shapes = sam3_segment_tile(tile_to_send, prompt, conf)
         for s in shapes:
-            s["points"] = [[px + x0, py + y0] for px, py in s["points"]]
+            pts = [[px + off_x, py + off_y] for px, py in s["points"]]
+            # 이미지 경계 클립
+            s["points"] = [[max(0, min(W - 1, p[0])), max(0, min(H - 1, p[1]))] for p in pts]
         return shapes
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -330,6 +358,8 @@ def main():
     ap.add_argument("--overlap",    type=float, default=0.10,   help="타일 중복 비율 (기본: 0.10)")
     ap.add_argument("--conf",       type=float, default=0.20,   help="SAM3 신뢰도 임계값 (기본: 0.20)")
     ap.add_argument("--workers",    type=int,   default=4,      help="병렬 스레드 수 (기본: 4)")
+    ap.add_argument("--debug",      action="store_true",        help="미분류·conf미달 디버그 이미지 저장")
+    ap.add_argument("--border-pad", type=int,   default=0,      help="타일 가장자리 패딩 픽셀 수 (기본: 0, 권장: 40)")
     args = ap.parse_args()
 
     img_path  = Path(args.input)
@@ -359,21 +389,26 @@ def main():
     print(f"SAM3 conf : {sam3_conf} (전체 최솟값)  |  cross-class NMS IoU: {cc_iou}")
     print(f"SAM3 호출 : {len(tile_filter)}회  |  병렬: {args.workers}스레드\n")
 
+    if args.border_pad > 0:
+        print(f"타일 패딩  : 각 면 {args.border_pad}px (실제 이미지 확장 + 경계는 검정 채움)\n")
+
     t0 = time.time()
     all_shapes = detect_tiled(image_bgr, args.cols, args.rows, args.overlap,
-                              sam3_conf, args.workers, tile_filter, combined_prompt)
+                              sam3_conf, args.workers, tile_filter, combined_prompt,
+                              border_pad=args.border_pad)
 
     print(f"전체 검출 {len(all_shapes)}개 → 분류 + per-class conf 필터 + NMS...")
-    buckets   = [[] for _ in categories]
-    unmatched = 0
+    buckets      = [[] for _ in categories]
+    dbg_unmatched = []   # (shape, sam3_label)
+    dbg_conffail  = []   # (shape, cat_idx)
     for s in all_shapes:
         idx = label_to_category(s.get("label", ""), categories)
         if idx < 0:
-            unmatched += 1
+            dbg_unmatched.append((s, s.get("label", "?")))
             continue
-        # per-class conf 필터
         cat_conf = categories[idx].get("conf", args.conf)
         if float(s.get("score", 0.0)) < cat_conf:
+            dbg_conffail.append((s, idx))
             continue
         buckets[idx].append(s)
 
@@ -391,8 +426,7 @@ def main():
     total_after = sum(len(b) for b in buckets)
     print(f"    {total_before}개 → {total_after}개")
 
-    if unmatched:
-        print(f"  (미분류/conf미달 {unmatched}개 제외)")
+    print(f"  (미분류 {len(dbg_unmatched)}개 / conf미달 {len(dbg_conffail)}개 제외)")
     print(f"\n완료: {time.time()-t0:.0f}초")
 
     vis = draw_detections(image_bgr, buckets, categories,
@@ -420,6 +454,57 @@ def main():
 
     cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 93])[1].tofile(str(out_path))
     print(f"저장: {out_path}")
+
+    if args.debug:
+        font   = cv2.FONT_HERSHEY_SIMPLEX
+        font_sc = max(0.4, min(W, H) / 8000)
+        thick   = max(1, int(font_sc * 2))
+
+        # ── 미분류 이미지
+        dbg1 = image_bgr.copy()
+        for s, sam_label in dbg_unmatched:
+            pts = np.array(s["points"], dtype=np.int32)
+            overlay = dbg1.copy()
+            cv2.fillPoly(overlay, [pts], (180, 180, 180))
+            cv2.addWeighted(overlay, 0.4, dbg1, 0.6, 0, dbg1)
+            cv2.polylines(dbg1, [pts], True, (255, 255, 255), 2)
+            cx = int(np.mean(pts[:, 0])); cy = int(np.mean(pts[:, 1]))
+            score = float(s.get("score", 0.0))
+            lbl = f"{sam_label[:12]} {score:.2f}"
+            (tw, th), _ = cv2.getTextSize(lbl, font, font_sc, thick)
+            tx, ty = cx - tw // 2, cy + th // 2
+            cv2.rectangle(dbg1, (tx-2, ty-th-2), (tx+tw+2, ty+2), (0,0,0), -1)
+            cv2.putText(dbg1, lbl, (tx, ty), font, font_sc, (255,255,255), thick, cv2.LINE_AA)
+        dbg1_path = out_path.parent / (out_path.stem + "_dbg_unmatched.jpg")
+        if max(dbg1.shape[:2]) > 4096:
+            sc = 4096 / max(dbg1.shape[:2])
+            dbg1 = cv2.resize(dbg1, (int(dbg1.shape[1]*sc), int(dbg1.shape[0]*sc)))
+        cv2.imencode(".jpg", dbg1, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tofile(str(dbg1_path))
+        print(f"디버그(미분류 {len(dbg_unmatched)}개): {dbg1_path}")
+
+        # ── conf미달 이미지
+        dbg2 = image_bgr.copy()
+        for s, cat_idx in dbg_conffail:
+            cat   = categories[cat_idx]
+            color = tuple(cat["color_bgr"])
+            pts   = np.array(s["points"], dtype=np.int32)
+            overlay = dbg2.copy()
+            cv2.fillPoly(overlay, [pts], color)
+            cv2.addWeighted(overlay, 0.35, dbg2, 0.65, 0, dbg2)
+            cv2.polylines(dbg2, [pts], True, color, 2)
+            cx = int(np.mean(pts[:, 0])); cy = int(np.mean(pts[:, 1]))
+            score = float(s.get("score", 0.0))
+            lbl = f"{cat['name'][:3].upper()} {score:.2f}"
+            (tw, th), _ = cv2.getTextSize(lbl, font, font_sc, thick)
+            tx, ty = cx - tw // 2, cy + th // 2
+            cv2.rectangle(dbg2, (tx-2, ty-th-2), (tx+tw+2, ty+2), (0,0,0), -1)
+            cv2.putText(dbg2, lbl, (tx, ty), font, font_sc, color, thick, cv2.LINE_AA)
+        dbg2_path = out_path.parent / (out_path.stem + "_dbg_conffail.jpg")
+        if max(dbg2.shape[:2]) > 4096:
+            sc = 4096 / max(dbg2.shape[:2])
+            dbg2 = cv2.resize(dbg2, (int(dbg2.shape[1]*sc), int(dbg2.shape[0]*sc)))
+        cv2.imencode(".jpg", dbg2, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tofile(str(dbg2_path))
+        print(f"디버그(conf미달 {len(dbg_conffail)}개): {dbg2_path}")
 
 
 if __name__ == "__main__":
