@@ -53,7 +53,6 @@ data/
 
 # 미정리 툴 (작업 중)
 tools/render_polygons_rainbow.py
-tools/render_skeleton_overlay.py
 tools/render_yolo_labels.py
 tools/sam3_sleeper_detect.py
 tools/tif_hollow_detect.py
