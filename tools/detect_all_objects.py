@@ -330,6 +330,7 @@ def main():
     ap.add_argument("--overlap",    type=float, default=0.10,   help="타일 중복 비율 (기본: 0.10)")
     ap.add_argument("--conf",       type=float, default=0.20,   help="SAM3 신뢰도 임계값 (기본: 0.20)")
     ap.add_argument("--workers",    type=int,   default=4,      help="병렬 스레드 수 (기본: 4)")
+    ap.add_argument("--save-labels", action="store_true",      help="YOLO 폴리곤 포맷 .txt 라벨 파일 저장")
     args = ap.parse_args()
 
     img_path  = Path(args.input)
@@ -420,6 +421,16 @@ def main():
 
     cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 93])[1].tofile(str(out_path))
     print(f"저장: {out_path}")
+
+    if args.save_labels:
+        label_path = out_path.with_suffix(".txt")
+        with open(label_path, "w", encoding="utf-8") as f:
+            for cls_idx, shapes in enumerate(buckets):
+                for s in shapes:
+                    pts_norm = [[px / W, py / H] for px, py in s["points"]]
+                    coords = " ".join(f"{x:.6f} {y:.6f}" for x, y in pts_norm)
+                    f.write(f"{cls_idx} {coords}\n")
+        print(f"라벨 저장: {label_path}")
 
 
 if __name__ == "__main__":
