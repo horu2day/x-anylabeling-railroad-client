@@ -142,15 +142,33 @@ def render(image_path: Path, label_path: Path, output_path: Path,
     print(f"  total polygons in label: {len(all_polygons)}, "
           f"selected: {len(polygons)} (indices: {keep_idx})")
 
-    # 폴리곤 외곽선 (연한 색) — 원본 인덱스 표시
+    # 수직/수평 판별: minAreaRect 장축 방향
+    def _poly_orient(pts):
+        rect = cv2.minAreaRect(pts)
+        _, (rw, rh), angle = rect
+        if min(rw, rh) < 1:
+            return (160, 160, 160), '?'
+        ar = max(rw, rh) / min(rw, rh)
+        long_deg = abs(angle) if rw >= rh else abs(angle + 90)
+        if ar < 1.3:
+            return (160, 160, 160), '?'   # 정사각형에 가까움 — 판별 불가
+        return ((255, 80, 0), 'V') if long_deg > 45 else ((0, 80, 255), 'H')
+
+    orient_map = {}   # orig_idx → 'V'/'H'/'?'
     for orig_idx, pts in zip(keep_idx, polygons):
-        cv2.polylines(img, [pts], True, (180, 180, 100), 2)
+        color, orient = _poly_orient(pts)
+        orient_map[orig_idx] = orient
+        overlay = img.copy()
+        cv2.fillPoly(overlay, [pts], color)
+        cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+        cv2.polylines(img, [pts], True, color, 2)
         cx = int(pts[:, 0].mean())
         cy = int(pts[:, 1].mean())
-        cv2.putText(img, str(orig_idx), (cx, cy),
+        label = f"{orig_idx}{orient}"
+        cv2.putText(img, label, (cx, cy),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 5)
-        cv2.putText(img, str(orig_idx), (cx, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+        cv2.putText(img, label, (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
 
     # 모든 폴리곤 합친 마스크 → skeleton
     merged = np.zeros((H, W), dtype=np.uint8)
@@ -236,9 +254,24 @@ def render(image_path: Path, label_path: Path, output_path: Path,
         if in_skel.any():
             cids = sorted(set(int(c) for c in np.unique(comp_labels[in_skel]) if c > 0))
             poly_to_cids[i] = cids
-            print(f"    poly {i:>2d}: component(s) {cids}")
         else:
-            print(f"    poly {i:>2d}: (no skeleton inside — too small or eroded)")
+            print(f"    poly {i:>2d}: (skeleton 없음 — 너무 작거나 erosion됨)")
+
+    # 역매핑: component → polygon 목록
+    cid_to_polys: dict = {}
+    for poly_i, cids in poly_to_cids.items():
+        for cid in cids:
+            cid_to_polys.setdefault(cid, []).append(poly_i)
+
+    print(f"\n  [그룹 → 폴리곤 목록] (전체 {len(cid_to_polys)}그룹)")
+    for cid in sorted(cid_to_polys.keys()):
+        n_px = int((comp_labels == cid).sum())
+        polys = cid_to_polys[cid]
+        orients = [f"{pi}({orient_map.get(pi, '?')})" for pi in polys]
+        has_v = any(orient_map.get(pi) == 'V' for pi in polys)
+        has_h = any(orient_map.get(pi) == 'H' for pi in polys)
+        tag = " ★라멘?" if (has_v and has_h) else ""
+        print(f"    Comp {cid:>2d} ({n_px:>5d}px): {orients}{tag}")
     print()
 
     # subdetect_polys가 지정된 경우, 해당 poly들이 속한 component만 sub-detect
