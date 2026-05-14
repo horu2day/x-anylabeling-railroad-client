@@ -113,6 +113,7 @@ def render(image_path: Path, label_path: Path, output_path: Path,
            subdetect: bool = False, subdetect_polys: set = None):
     buf = np.fromfile(str(image_path), dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    img_orig = img.copy()
     H, W = img.shape[:2]
 
     text = label_path.read_text(encoding="utf-8").strip() if label_path.exists() else ""
@@ -142,22 +143,43 @@ def render(image_path: Path, label_path: Path, output_path: Path,
     print(f"  total polygons in label: {len(all_polygons)}, "
           f"selected: {len(polygons)} (indices: {keep_idx})")
 
-    # 수직/수평 판별: minAreaRect 장축 방향
+    # 수직/수평 판별: 장축 vs 이미지 중심→폴리곤 중심 radial 방향 비교
+    # 드론 사선 촬영에서 수직 기둥은 이미지 중심에서 방사형으로 기울어져 보임
+    img_cx, img_cy = W / 2.0, H / 2.0
+
     def _poly_orient(pts):
         rect = cv2.minAreaRect(pts)
-        _, (rw, rh), angle = rect
+        (rx, ry), (rw, rh), angle = rect
         if min(rw, rh) < 1:
-            return (160, 160, 160), '?'
+            return (160, 160, 160), '?', 0.0
         ar = max(rw, rh) / min(rw, rh)
-        long_deg = abs(angle) if rw >= rh else abs(angle + 90)
         if ar < 1.3:
-            return (160, 160, 160), '?'   # 정사각형에 가까움 — 판별 불가
-        return ((255, 80, 0), 'V') if long_deg > 45 else ((0, 80, 255), 'H')
+            return (160, 160, 160), '?', 0.0
+        # 장축 방향 벡터
+        long_angle_deg = angle if rw >= rh else angle + 90
+        lx = np.cos(np.radians(long_angle_deg))
+        ly = np.sin(np.radians(long_angle_deg))
+        # radial 방향: 이미지 중심 → 폴리곤 중심
+        rdx, rdy = rx - img_cx, ry - img_cy
+        radial_norm = (rdx**2 + rdy**2) ** 0.5
+        if radial_norm < 1:
+            return (160, 160, 160), '?', 0.0
+        rdx, rdy = rdx / radial_norm, rdy / radial_norm
+        # 장축과 radial 방향의 정렬도 (|cos θ|)
+        cos_sim = abs(lx * rdx + ly * rdy)
+        # cos_sim → 1: 장축이 radial 방향 = 수직 기둥
+        # cos_sim → 0: 장축이 radial ⊥ 방향 = 수평 빔
+        if cos_sim > 0.7:
+            return (255, 80, 0), 'V', cos_sim
+        else:
+            return (0, 80, 255), 'H', cos_sim
 
     orient_map = {}   # orig_idx → 'V'/'H'/'?'
+    print("\n  [폴리곤 수직/수평 분류]")
     for orig_idx, pts in zip(keep_idx, polygons):
-        color, orient = _poly_orient(pts)
+        color, orient, cos_sim = _poly_orient(pts)
         orient_map[orig_idx] = orient
+        print(f"    poly {orig_idx:>2d}: {orient}  cos_sim={cos_sim:.3f}")
         overlay = img.copy()
         cv2.fillPoly(overlay, [pts], color)
         cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
@@ -437,6 +459,37 @@ def render(image_path: Path, label_path: Path, output_path: Path,
     print(f"  {len(polygons)} polygons, skeleton 픽셀 {int((skel > 0).sum())}")
     print(f"  그룹(skeleton component) {total_groups}개")
     print(f"  분기점 {total_branches}개, 끝점 {total_endpoints}개, 연결선 {total_lines}개")
+
+    # 그룹 시각화: comp별 색상으로 폴리곤 표시 (원본 이미지 위)
+    _PALETTE = [
+        (255,  80,  80), ( 80, 220,  80), ( 80, 120, 255), (220, 200,  50),
+        (220,  80, 220), ( 60, 220, 220), (255, 160,  60), (100, 200, 120),
+        (180,  80, 255), (255, 140, 100),
+    ]
+    _poly2comp = {pi: cid for cid, pis in cid_to_polys.items() for pi in pis}
+    _idx2pos   = {orig: i for i, orig in enumerate(keep_idx)}
+
+    img = img_orig.copy()
+    for orig_idx, pts in zip(keep_idx, polygons):
+        cid = _poly2comp.get(orig_idx)
+        col = _PALETTE[(cid - 1) % len(_PALETTE)] if cid else (140, 140, 140)
+        ov = img.copy()
+        cv2.fillPoly(ov, [pts], col)
+        cv2.addWeighted(ov, 0.35, img, 0.65, 0, img)
+        cv2.polylines(img, [pts], True, col, 3)
+        cx, cy = int(pts[:, 0].mean()), int(pts[:, 1].mean())
+        cv2.putText(img, str(orig_idx), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 4)
+        cv2.putText(img, str(orig_idx), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.0, col, 2)
+
+    for cid, pis in cid_to_polys.items():
+        col = _PALETTE[(cid - 1) % len(_PALETTE)]
+        valid = [_idx2pos[pi] for pi in pis if pi in _idx2pos]
+        if not valid:
+            continue
+        cx = int(sum(int(polygons[i][:, 0].mean()) for i in valid) / len(valid))
+        cy = int(sum(int(polygons[i][:, 1].mean()) for i in valid) / len(valid))
+        cv2.putText(img, f"C{cid}", (cx, cy + 55), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 255), 7)
+        cv2.putText(img, f"C{cid}", (cx, cy + 55), cv2.FONT_HERSHEY_SIMPLEX, 2.0, col, 3)
 
     h, w = img.shape[:2]
     scale = min(1.0, 4096 / max(h, w))
