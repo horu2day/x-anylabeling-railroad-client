@@ -262,6 +262,52 @@ def judge_raamen(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
     return '', 0
 
 
+def _merge_poly_hull(indices, polys):
+    """여러 폴리곤 점들을 합쳐 Convex Hull 좌표 반환 (AnyLabeling points 형식)."""
+    all_pts = np.vstack([polys[i] for i in indices])
+    hull = cv2.convexHull(all_pts.astype(np.int32))
+    return [[float(p[0][0]), float(p[0][1])] for p in hull]
+
+
+def group_detail(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
+    """
+    라멘 그룹의 세부 구성 분석.
+    Returns dict: main_h, junk_h, valid_pole_clusters, attach_clusters
+    """
+    hs, vs = group['H'], group['V']
+    if not hs:
+        return {'main_h': None, 'junk_h': [], 'valid_pole_clusters': [], 'attach_clusters': []}
+
+    main_h = max(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)))
+    junk_h = [i for i in hs if i != main_h]
+
+    pts_h = polys[main_h]
+    hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
+    span = hx1 - hx0
+
+    pole_clusters = _cluster_polys(vs, polys, margin=v_cluster_margin)
+    x_tol = max(span * 0.5, 50)
+    left_zone  = hx0 + span * 0.35
+    right_zone = hx1 - span * 0.35
+
+    valid_pole_clusters, attach_clusters = [], []
+    for cluster in pole_clusters:
+        ccx = float(np.mean([polys[i][:, 0].mean() for i in cluster]))
+        in_range    = hx0 - x_tol <= ccx <= hx1 + x_tol
+        in_end_zone = ccx <= left_zone or ccx >= right_zone
+        if in_range and in_end_zone:
+            valid_pole_clusters.append(cluster)
+        elif in_range:
+            attach_clusters.append(cluster)
+
+    return {
+        'main_h': main_h,
+        'junk_h': junk_h,
+        'valid_pole_clusters': valid_pole_clusters,
+        'attach_clusters': attach_clusters,
+    }
+
+
 # ── 시각화 상수 ─────────────────────────────────────────────────────────
 
 _VH_COLOR = {
@@ -413,26 +459,67 @@ def render(image_path, label_path, output_path, args,
     cv2.imencode(output_path.suffix, img)[1].tofile(str(output_path))
     print(f"\n  → {output_path}")
 
-    # JSON 결과 저장 (output_path와 같은 위치, .json 확장자)
+    # AnyLabeling JSON 저장
     import json
-    result = {
-        "image": str(image_path),
-        "label": str(label_path),
-        "vanishing_point": {"x": round(vp_x, 1), "y": round(vp_y, 1)},
-        "raamen_groups": [
-            {
-                "group_id": g['id'],
-                "verdict": g['verdict'],
-                "n_poles": g['n_poles'],
-                "area": round(g['area'], 1),
-                "H_polygons": g['H'],
-                "V_polygons": g['V'],
-            }
-            for g in valid_items
-        ],
+
+    def _shape(label, points, gid, desc):
+        return {"label": label, "score": None, "points": points,
+                "group_id": gid, "description": desc,
+                "shape_type": "polygon", "flags": None}
+
+    shapes = []
+    for g in valid_items:
+        gid     = g['id']
+        verdict = g['verdict']
+        desc_base = f"G{gid} {verdict}"
+
+        if not g['H']:
+            # RAAMEN_CENTER: V 폴리곤만 있는 중앙 영역 그룹
+            for vi in g['V']:
+                shapes.append(_shape("raamen_center",
+                                     [[float(p[0]), float(p[1])] for p in polys[vi]],
+                                     gid, desc_base))
+            continue
+
+        det = group_detail(g, polys, W)
+
+        # 주 빔 (largest H)
+        shapes.append(_shape("raamen_beam",
+                             _merge_poly_hull([det['main_h']], polys),
+                             gid, f"{desc_base} beam"))
+
+        # 잡 H 폴리곤 클러스터 (브라켓 등 부속)
+        if det['junk_h']:
+            junk_clusters = _cluster_polys(det['junk_h'], polys)
+            for jc in junk_clusters:
+                shapes.append(_shape("raamen_beam_sub",
+                                     _merge_poly_hull(jc, polys),
+                                     gid, f"{desc_base} beam_sub({sorted(jc)})"))
+
+        # 유효 기둥 클러스터 (끝단)
+        for pi, cluster in enumerate(det['valid_pole_clusters'], 1):
+            shapes.append(_shape("raamen_pole",
+                                 _merge_poly_hull(cluster, polys),
+                                 gid, f"{desc_base} pole{pi}({sorted(cluster)})"))
+
+        # 중앙 부속물 클러스터 (기둥 아님)
+        for cluster in det['attach_clusters']:
+            shapes.append(_shape("raamen_pole_attach",
+                                 _merge_poly_hull(cluster, polys),
+                                 gid, f"{desc_base} attach({sorted(cluster)})"))
+
+    anylabel_json = {
+        "version": "3.3.9",
+        "flags": {},
+        "shapes": shapes,
+        "imagePath": image_path.name,
+        "imageData": None,
+        "imageHeight": H,
+        "imageWidth": W,
     }
     json_path = output_path.with_suffix(".json")
-    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.write_text(json.dumps(anylabel_json, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
     print(f"  → {json_path}")
 
 
