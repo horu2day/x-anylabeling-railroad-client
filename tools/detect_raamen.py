@@ -176,6 +176,8 @@ def judge_raamen(group, polys, W, center_ratio=0.2):
     Returns: ('RAAMEN' | 'RAAMEN_OCCLUDED' | 'PARTIAL' | '', n_poles)
     """
     hs, vs = group['H'], group['V']
+    if not hs:
+        return '', 0
     # 빔 전체 bbox
     all_h_pts = np.vstack([polys[i] for i in hs])
     hx0 = int(all_h_pts[:, 0].min()); hx1 = int(all_h_pts[:, 0].max())
