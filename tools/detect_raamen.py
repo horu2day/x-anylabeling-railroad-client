@@ -405,13 +405,35 @@ def render(image_path, label_path, output_path, args,
         cv2.putText(img, lbl, (x0, y0 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
 
-    # 저장
+    # 이미지 저장
     scale = min(1.0, 4096 / max(H, W))
     if scale < 1.0:
         img = cv2.resize(img, (int(W * scale), int(H * scale)))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imencode(output_path.suffix, img)[1].tofile(str(output_path))
     print(f"\n  → {output_path}")
+
+    # JSON 결과 저장 (output_path와 같은 위치, .json 확장자)
+    import json
+    result = {
+        "image": str(image_path),
+        "label": str(label_path),
+        "vanishing_point": {"x": round(vp_x, 1), "y": round(vp_y, 1)},
+        "raamen_groups": [
+            {
+                "group_id": g['id'],
+                "verdict": g['verdict'],
+                "n_poles": g['n_poles'],
+                "area": round(g['area'], 1),
+                "H_polygons": g['H'],
+                "V_polygons": g['V'],
+            }
+            for g in valid_items
+        ],
+    }
+    json_path = output_path.with_suffix(".json")
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  → {json_path}")
 
 
 def main():
