@@ -24,7 +24,7 @@ from pathlib import Path
 def load_polygons(label_path, W, H, class_ids=None):
     """YOLO .txt 라벨 → 픽셀 좌표 float32 폴리곤 리스트."""
     if not label_path.exists():
-        return []
+        raise FileNotFoundError(f"라벨 파일을 찾을 수 없습니다: {label_path}")
     polys = []
     for line in label_path.read_text(encoding="utf-8").splitlines():
         parts = line.split()
@@ -110,65 +110,102 @@ def classify_vh(pts, vp_x, vp_y, v_thresh):
 
 # ── Phase 3: 근접성 기반 그룹핑 ─────────────────────────────────────────
 
+def _poly_bbox(pts):
+    return int(pts[:, 0].min()), int(pts[:, 1].min()), int(pts[:, 0].max()), int(pts[:, 1].max())
+
+
+def _union_bbox(bboxes):
+    return (min(b[0] for b in bboxes), min(b[1] for b in bboxes),
+            max(b[2] for b in bboxes), max(b[3] for b in bboxes))
+
+
 def proximity_groups(polys, orients, v_search_scale=3.0, x_margin_scale=0.4):
     """
-    H 앵커 기반 그룹핑.
-    H bbox 아래 탐색 영역(v_search_scale * H_height)에서 V 폴리곤 수집.
-    Returns: list of {'H': idx, 'V': [idx, ...]}
+    Step 1: X 범위가 겹치고 Y 중심이 가까운 H 폴리곤들을 같은 빔(Beam)으로 클러스터링.
+    Step 2: 각 빔 bbox 아래 탐색 영역에서 V 폴리곤 수집.
+    Step 3: 각 V를 가장 가까운 빔에 독점 배정 (중복 없음).
+    Returns: list of {'id': int, 'H': [idx,...], 'V': [idx,...]}
     """
     h_idx = [i for i, o in enumerate(orients) if o == 'H']
     v_idx = [i for i, o in enumerate(orients) if o == 'V']
 
-    groups = []
+    # Step 1: H 폴리곤 → Beam 클러스터
+    beams = []  # list of {'H': [idx,...], 'bbox': (x0,y0,x1,y1)}
     for hi in h_idx:
-        pts_h = polys[hi]
-        hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
-        hy0 = int(pts_h[:, 1].min()); hy1 = int(pts_h[:, 1].max())
-        h_w, h_h = hx1 - hx0, hy1 - hy0
-        x_margin = max(h_w * x_margin_scale, 20)
-        search_y_end = hy1 + max(h_h * v_search_scale, 60)
+        b = _poly_bbox(polys[hi])
+        x0, y0, x1, y1 = b
+        bcy = (y0 + y1) / 2.0
+        merged = False
+        for beam in beams:
+            bx0, by0, bx1, by1 = beam['bbox']
+            # X 범위가 실제로 겹치고 Y 중심이 80px 이내이면 같은 빔
+            x_overlap = x1 > bx0 and bx1 > x0
+            y_close = abs(bcy - (by0 + by1) / 2.0) < 80
+            if x_overlap and y_close:
+                beam['H'].append(hi)
+                beam['bbox'] = _union_bbox([beam['bbox'], b])
+                merged = True
+                break
+        if not merged:
+            beams.append({'H': [hi], 'bbox': b})
 
-        found_v = []
-        for vi in v_idx:
-            vcx = float(polys[vi][:, 0].mean())
-            vcy = float(polys[vi][:, 1].mean())
-            if (hx0 - x_margin <= vcx <= hx1 + x_margin
-                    and hy0 <= vcy <= search_y_end):
-                found_v.append(vi)
-        groups.append({'H': hi, 'V': found_v})
-    return groups
+    # Step 2: 빔별 탐색 영역 계산
+    for beam in beams:
+        bx0, by0, bx1, by1 = beam['bbox']
+        bw, bh = bx1 - bx0, by1 - by0
+        x_margin = max(bw * x_margin_scale, 20)
+        beam['sx0'] = bx0 - x_margin
+        beam['sx1'] = bx1 + x_margin
+        beam['sy0'] = by0
+        beam['sy1'] = by1 + max(bh * v_search_scale, 60)
+        beam['V'] = []
+
+    # Step 3: 각 V를 탐색 영역 내 가장 가까운 빔에 독점 배정
+    for vi in v_idx:
+        vcx = float(polys[vi][:, 0].mean())
+        vcy = float(polys[vi][:, 1].mean())
+        best_beam, best_dist = None, float('inf')
+        for beam in beams:
+            if beam['sx0'] <= vcx <= beam['sx1'] and beam['sy0'] <= vcy <= beam['sy1']:
+                bx0, by0, bx1, by1 = beam['bbox']
+                dist = ((vcx - (bx0 + bx1) / 2.0) ** 2 + (vcy - (by0 + by1) / 2.0) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist, best_beam = dist, beam
+        if best_beam is not None:
+            best_beam['V'].append(vi)
+
+    return [{'id': gid, 'H': b['H'], 'V': b['V']}
+            for gid, b in enumerate(beams, 1)]
 
 
 # ── Phase 4: 라멘 구조 판정 ─────────────────────────────────────────────
 
 def judge_raamen(group, polys, W, center_ratio=0.2):
     """
-    라멘 구조 판정.
-    Returns: 'RAAMEN' | 'RAAMEN_CENTER' | 'RAAMEN_OCCLUDED' | 'PARTIAL' | ''
+    라멘 구조 판정. H는 리스트 (같은 빔의 여러 폴리곤).
+    Returns: ('RAAMEN' | 'RAAMEN_OCCLUDED' | 'PARTIAL' | '', n_poles)
     """
-    hi, vs = group['H'], group['V']
-    pts_h = polys[hi]
-    hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
+    hs, vs = group['H'], group['V']
+    # 빔 전체 bbox
+    all_h_pts = np.vstack([polys[i] for i in hs])
+    hx0 = int(all_h_pts[:, 0].min()); hx1 = int(all_h_pts[:, 0].max())
     hcx = (hx0 + hx1) / 2.0
     is_center = abs(hcx - W / 2) < W * center_ratio
+    span = hx1 - hx0
+    n_poles = len(vs)
 
-    if len(vs) >= 2:
-        # V 폴리곤을 x 중심 기준으로 정렬
+    if n_poles >= 2:
         vs_by_x = sorted(vs, key=lambda i: float(polys[i][:, 0].mean()))
         lcx = float(polys[vs_by_x[0]][:, 0].mean())
         rcx = float(polys[vs_by_x[-1]][:, 0].mean())
-        span = hx1 - hx0
-        # 좌측 V는 H 좌측 40% 내, 우측 V는 H 우측 40% 내에 위치
         if lcx <= hx0 + span * 0.4 and rcx >= hx1 - span * 0.4:
-            return 'RAAMEN'
-        return 'PARTIAL'
+            return 'RAAMEN', n_poles
+        return 'PARTIAL', n_poles
 
-    if len(vs) == 1:
-        # 중앙 영역: 기둥/빔 중첩 → 정상 라멘 간주
-        # 외곽 영역: 가림 현상
-        return 'RAAMEN_CENTER' if is_center else 'RAAMEN_OCCLUDED'
+    if n_poles == 1:
+        return ('RAAMEN_OCCLUDED', 1) if not is_center else ('', 1)
 
-    return ''
+    return '', 0
 
 
 # ── 시각화 상수 ─────────────────────────────────────────────────────────
@@ -180,7 +217,6 @@ _VH_COLOR = {
 }
 _RAAMEN_COLOR = {
     'RAAMEN':          (  0, 255,   0),   # 초록
-    'RAAMEN_CENTER':   (  0, 255, 255),   # 노랑
     'RAAMEN_OCCLUDED': (  0, 165, 255),   # 주황
     'PARTIAL':         (128, 128, 128),   # 회색
 }
@@ -190,7 +226,8 @@ _RAAMEN_COLOR = {
 
 def render(image_path, label_path, output_path,
            class_ids=None, epsilon=4.0, v_thresh=20.0,
-           vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
+           vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2,
+           min_group_area=0):
 
     buf = np.fromfile(str(image_path), dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -237,17 +274,36 @@ def render(image_path, label_path, output_path,
 
     # ── Phase 3 ──────────────────────────────────────────────────────────
     groups = proximity_groups(polys, orients)
-    print(f"\n  [그룹핑] H-앵커 그룹 {len(groups)}개")
+    print(f"\n  [그룹핑] Beam 클러스터 {len(groups)}개")
     for g in groups:
-        print(f"    H={g['H']}  V={g['V']}")
+        print(f"    G{g['id']}: H={g['H']}  V={g['V']}")
 
     # ── Phase 4 ──────────────────────────────────────────────────────────
     print(f"\n  [라멘 판정]")
-    verdicts = []
     for g in groups:
-        v = judge_raamen(g, polys, W)
-        verdicts.append(v)
-        print(f"    H={g['H']} V={g['V']} → {v or '-'}")
+        verdict, n_poles = judge_raamen(g, polys, W)
+        g['verdict'] = verdict
+        g['n_poles'] = n_poles
+        pole_str = f"{n_poles}poles" if n_poles else "-"
+        print(f"    G{g['id']}: H={g['H']} V={g['V']} → {verdict or '-':18s} ({pole_str})")
+
+    # 면적 계산
+    for g in groups:
+        area = sum(cv2.contourArea(polys[i].astype(np.int32)) for i in g['H'] + g['V'])
+        g['area'] = area
+
+    valid_items = [g for g in groups if g['verdict']]
+    valid_items.sort(key=lambda x: x['area'], reverse=True)
+
+    print(f"\n  [최종 라멘 객체] {len(valid_items)}개 (면적순)")
+    for g in valid_items:
+        print(f"    G{g['id']}: H={g['H']} V={g['V']} → {g['verdict']:18s} ({g['n_poles']}poles)  Area={g['area']:,.0f}")
+
+    # 최소 면적 필터링
+    if min_group_area > 0:
+        before = len(valid_items)
+        valid_items = [g for g in valid_items if g['area'] >= min_group_area]
+        print(f"  [필터] 최소 면적 {min_group_area} 미만 제거: {before} → {len(valid_items)}개")
 
     # ── 시각화 ───────────────────────────────────────────────────────────
 
@@ -285,20 +341,20 @@ def render(image_path, label_path, output_path,
         cv2.putText(img, f"VP({vp_ix},{vp_iy})", (ax_s + 5, ay_s - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-    # 4. 라멘 그룹 강조: 바운딩 박스 + 판정 라벨
-    for g, verdict in zip(groups, verdicts):
-        if not verdict:
-            continue
+    # 4. 라멘 그룹 강조: 바운딩 박스 + 그룹 ID + 판정 라벨
+    for g in valid_items:
+        verdict = g['verdict']
         color = _RAAMEN_COLOR[verdict]
-        all_idx = [g['H']] + g['V']
+        all_idx = g['H'] + g['V']
         all_pts = np.vstack([polys[i] for i in all_idx]).astype(np.int32)
         x0 = all_pts[:, 0].min() - 15; y0 = all_pts[:, 1].min() - 15
         x1 = all_pts[:, 0].max() + 15; y1 = all_pts[:, 1].max() + 15
         cv2.rectangle(img, (x0, y0), (x1, y1), color, 4)
-        cv2.putText(img, verdict, (x0, y0 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 7)
-        cv2.putText(img, verdict, (x0, y0 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+        lbl = f"G{g['id']} {verdict} ({g['n_poles']}poles)"
+        cv2.putText(img, lbl, (x0, y0 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 6)
+        cv2.putText(img, lbl, (x0, y0 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
 
     # 저장
     scale = min(1.0, 4096 / max(H, W))
@@ -320,12 +376,15 @@ def main():
                     help="approxPolyDP epsilon (기본 4.0px)")
     ap.add_argument("--v-thresh",   type=float, default=20.0,
                     help="V/H 분류 각도 임계값 degrees (기본 20°)")
+    ap.add_argument("--min-group-area", type=float, default=0,
+                    help="라멘 그룹의 최소 면적 합계 (기본 0)")
     args = ap.parse_args()
 
     class_ids = ({int(x) for x in args.class_ids.split(',') if x.strip()}
                  if args.class_ids else None)
     render(Path(args.image), Path(args.label), Path(args.output),
-           class_ids=class_ids, epsilon=args.epsilon, v_thresh=args.v_thresh)
+           class_ids=class_ids, epsilon=args.epsilon, v_thresh=args.v_thresh,
+           min_group_area=args.min_group_area)
 
 
 if __name__ == "__main__":
