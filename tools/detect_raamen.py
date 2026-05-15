@@ -108,74 +108,64 @@ def classify_vh(pts, vp_x, vp_y, v_thresh):
     return ('V' if diff < v_thresh else 'H'), diff
 
 
-# ── Phase 3: 근접성 기반 그룹핑 ─────────────────────────────────────────
+# ── Phase 3: 폴리곤 접촉/교차 기반 그룹핑 ───────────────────────────────
 
-def _poly_bbox(pts):
-    return int(pts[:, 0].min()), int(pts[:, 1].min()), int(pts[:, 0].max()), int(pts[:, 1].max())
-
-
-def _union_bbox(bboxes):
-    return (min(b[0] for b in bboxes), min(b[1] for b in bboxes),
-            max(b[2] for b in bboxes), max(b[3] for b in bboxes))
-
-
-def proximity_groups(polys, orients, v_search_scale=3.0, x_margin_scale=0.4):
+def connectivity_groups(polys, orients, margin=30):
     """
-    Step 1: X 범위가 겹치고 Y 중심이 가까운 H 폴리곤들을 같은 빔(Beam)으로 클러스터링.
-    Step 2: 각 빔 bbox 아래 탐색 영역에서 V 폴리곤 수집.
-    Step 3: 각 V를 가장 가까운 빔에 독점 배정 (중복 없음).
+    폴리곤 bbox가 margin px 이내로 닿거나 교차하면 같은 그룹 (H/V 구분 없음).
+    Union-Find로 연결된 폴리곤들을 묶은 뒤, 각 그룹 내에서 H/V 목록 분리.
     Returns: list of {'id': int, 'H': [idx,...], 'V': [idx,...]}
     """
-    h_idx = [i for i, o in enumerate(orients) if o == 'H']
-    v_idx = [i for i, o in enumerate(orients) if o == 'V']
+    n = len(polys)
+    parent = list(range(n))
 
-    # Step 1: H 폴리곤 → Beam 클러스터
-    beams = []  # list of {'H': [idx,...], 'bbox': (x0,y0,x1,y1)}
-    for hi in h_idx:
-        b = _poly_bbox(polys[hi])
-        x0, y0, x1, y1 = b
-        bcy = (y0 + y1) / 2.0
-        merged = False
-        for beam in beams:
-            bx0, by0, bx1, by1 = beam['bbox']
-            # X 범위가 실제로 겹치고 Y 중심이 80px 이내이면 같은 빔
-            x_overlap = x1 > bx0 and bx1 > x0
-            y_close = abs(bcy - (by0 + by1) / 2.0) < 80
-            if x_overlap and y_close:
-                beam['H'].append(hi)
-                beam['bbox'] = _union_bbox([beam['bbox'], b])
-                merged = True
-                break
-        if not merged:
-            beams.append({'H': [hi], 'bbox': b})
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-    # Step 2: 빔별 탐색 영역 계산
-    for beam in beams:
-        bx0, by0, bx1, by1 = beam['bbox']
-        bw, bh = bx1 - bx0, by1 - by0
-        x_margin = max(bw * x_margin_scale, 20)
-        beam['sx0'] = bx0 - x_margin
-        beam['sx1'] = bx1 + x_margin
-        beam['sy0'] = by0
-        beam['sy1'] = by1 + max(bh * v_search_scale, 60)
-        beam['V'] = []
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
 
-    # Step 3: 각 V를 탐색 영역 내 가장 가까운 빔에 독점 배정
-    for vi in v_idx:
-        vcx = float(polys[vi][:, 0].mean())
-        vcy = float(polys[vi][:, 1].mean())
-        best_beam, best_dist = None, float('inf')
-        for beam in beams:
-            if beam['sx0'] <= vcx <= beam['sx1'] and beam['sy0'] <= vcy <= beam['sy1']:
-                bx0, by0, bx1, by1 = beam['bbox']
-                dist = ((vcx - (bx0 + bx1) / 2.0) ** 2 + (vcy - (by0 + by1) / 2.0) ** 2) ** 0.5
-                if dist < best_dist:
-                    best_dist, best_beam = dist, beam
-        if best_beam is not None:
-            best_beam['V'].append(vi)
+    # 폴리곤 bbox 미리 계산
+    bboxes = []
+    for pts in polys:
+        bboxes.append((pts[:, 0].min(), pts[:, 1].min(),
+                       pts[:, 0].max(), pts[:, 1].max()))
 
-    return [{'id': gid, 'H': b['H'], 'V': b['V']}
-            for gid, b in enumerate(beams, 1)]
+    # bbox가 margin 이내로 닿거나 교차하면 union
+    for i in range(n):
+        ax0, ay0, ax1, ay1 = bboxes[i]
+        for j in range(i + 1, n):
+            bx0, by0, bx1, by1 = bboxes[j]
+            if (ax1 + margin >= bx0 and bx1 + margin >= ax0 and
+                    ay1 + margin >= by0 and by1 + margin >= ay0):
+                union(i, j)
+
+    # 연결 컴포넌트 수집
+    from collections import defaultdict
+    comp = defaultdict(list)
+    for i in range(n):
+        comp[find(i)].append(i)
+
+    groups = []
+    for gid, members in enumerate(comp.values(), 1):
+        h_list = sorted(i for i in members if orients[i] == 'H')
+        v_list = sorted(i for i in members if orients[i] == 'V')
+        groups.append({'id': gid, 'H': h_list, 'V': v_list})
+
+    # 면적 내림차순으로 ID 재부여 (큰 그룹이 G1)
+    for g in groups:
+        g['area'] = sum(cv2.contourArea(polys[i].astype(np.int32))
+                        for i in g['H'] + g['V'])
+    groups.sort(key=lambda x: x['area'], reverse=True)
+    for gid, g in enumerate(groups, 1):
+        g['id'] = gid
+
+    return groups
 
 
 # ── Phase 4: 라멘 구조 판정 ─────────────────────────────────────────────
@@ -224,10 +214,9 @@ _RAAMEN_COLOR = {
 
 # ── 메인 렌더링 ─────────────────────────────────────────────────────────
 
-def render(image_path, label_path, output_path,
+def render(image_path, label_path, output_path, args,
            class_ids=None, epsilon=4.0, v_thresh=20.0,
-           vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2,
-           min_group_area=0):
+           vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
 
     buf = np.fromfile(str(image_path), dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -273,8 +262,8 @@ def render(image_path, label_path, output_path,
     print(f"  V:{orients.count('V')}  H:{orients.count('H')}  ?:{orients.count('?')}")
 
     # ── Phase 3 ──────────────────────────────────────────────────────────
-    groups = proximity_groups(polys, orients)
-    print(f"\n  [그룹핑] Beam 클러스터 {len(groups)}개")
+    groups = connectivity_groups(polys, orients, margin=args.margin)
+    print(f"\n  [그룹핑] 연결 컴포넌트 {len(groups)}개 (margin={args.margin}px)")
     for g in groups:
         print(f"    G{g['id']}: H={g['H']}  V={g['V']}")
 
@@ -287,11 +276,6 @@ def render(image_path, label_path, output_path,
         pole_str = f"{n_poles}poles" if n_poles else "-"
         print(f"    G{g['id']}: H={g['H']} V={g['V']} → {verdict or '-':18s} ({pole_str})")
 
-    # 면적 계산
-    for g in groups:
-        area = sum(cv2.contourArea(polys[i].astype(np.int32)) for i in g['H'] + g['V'])
-        g['area'] = area
-
     valid_items = [g for g in groups if g['verdict']]
     valid_items.sort(key=lambda x: x['area'], reverse=True)
 
@@ -300,10 +284,10 @@ def render(image_path, label_path, output_path,
         print(f"    G{g['id']}: H={g['H']} V={g['V']} → {g['verdict']:18s} ({g['n_poles']}poles)  Area={g['area']:,.0f}")
 
     # 최소 면적 필터링
-    if min_group_area > 0:
+    if args.min_group_area > 0:
         before = len(valid_items)
-        valid_items = [g for g in valid_items if g['area'] >= min_group_area]
-        print(f"  [필터] 최소 면적 {min_group_area} 미만 제거: {before} → {len(valid_items)}개")
+        valid_items = [g for g in valid_items if g['area'] >= args.min_group_area]
+        print(f"  [필터] 최소 면적 {args.min_group_area} 미만 제거: {before} → {len(valid_items)}개")
 
     # ── 시각화 ───────────────────────────────────────────────────────────
 
@@ -376,15 +360,16 @@ def main():
                     help="approxPolyDP epsilon (기본 4.0px)")
     ap.add_argument("--v-thresh",   type=float, default=20.0,
                     help="V/H 분류 각도 임계값 degrees (기본 20°)")
+    ap.add_argument("--margin",         type=int,   default=30,
+                    help="폴리곤 접촉 판정 margin px (기본 30)")
     ap.add_argument("--min-group-area", type=float, default=0,
                     help="라멘 그룹의 최소 면적 합계 (기본 0)")
     args = ap.parse_args()
 
     class_ids = ({int(x) for x in args.class_ids.split(',') if x.strip()}
                  if args.class_ids else None)
-    render(Path(args.image), Path(args.label), Path(args.output),
-           class_ids=class_ids, epsilon=args.epsilon, v_thresh=args.v_thresh,
-           min_group_area=args.min_group_area)
+    render(Path(args.image), Path(args.label), Path(args.output), args,
+           class_ids=class_ids, epsilon=args.epsilon, v_thresh=args.v_thresh)
 
 
 if __name__ == "__main__":
