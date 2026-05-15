@@ -214,7 +214,15 @@ def judge_raamen(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
     Returns: ('RAAMEN' | 'RAAMEN_OCCLUDED' | 'PARTIAL' | '', n_poles)
     """
     hs, vs = group['H'], group['V']
+
+    # H 없음: 중앙 영역이면 V/H 분류 자체가 신뢰 불가 (기둥·빔 각도 수렴)
+    # → 2개 이상의 V 폴리곤이 중앙에 모여 있으면 RAAMEN_CENTER 처리
     if not hs:
+        if len(vs) >= 2:
+            all_v_pts = np.vstack([polys[i] for i in vs])
+            gcx = float(all_v_pts[:, 0].mean())
+            if abs(gcx - W / 2) < W * center_ratio:
+                return 'RAAMEN_CENTER', len(vs)
         return '', 0
 
     # 가장 큰 H 폴리곤을 빔 기준으로 사용 (잡 H 폴리곤 무시)
@@ -263,7 +271,8 @@ _VH_COLOR = {
 }
 _RAAMEN_COLOR = {
     'RAAMEN':          (  0, 255,   0),   # 초록
-    'RAAMEN_OCCLUDED': (  0, 165, 255),   # 주황
+    'RAAMEN_CENTER':   (  0, 255, 255),   # 노랑 (중앙 영역, H/V 분류 불신뢰)
+    'RAAMEN_OCCLUDED': (  0, 165, 255),   # 주황 (가림/부분 검출)
     'PARTIAL':         (128, 128, 128),   # 회색
 }
 
