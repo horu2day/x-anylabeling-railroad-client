@@ -22,11 +22,13 @@ from pathlib import Path
 # ── Phase 1: 파싱 + 단순화 + 소실점 ─────────────────────────────────────
 
 def load_polygons(label_path, W, H, class_ids=None):
-    """YOLO .txt 라벨 → 픽셀 좌표 float32 폴리곤 리스트."""
+    """YOLO .txt 라벨 → (픽셀 좌표 폴리곤 리스트, 절대 라인 인덱스 리스트).
+    절대 라인 인덱스 = AnyLabeling JSON shapes[] 배열의 절대 인덱스와 동일.
+    """
     if not label_path.exists():
         raise FileNotFoundError(f"라벨 파일을 찾을 수 없습니다: {label_path}")
-    polys = []
-    for line in label_path.read_text(encoding="utf-8").splitlines():
+    polys, abs_indices = [], []
+    for abs_idx, line in enumerate(label_path.read_text(encoding="utf-8").splitlines()):
         parts = line.split()
         if not parts:
             continue
@@ -39,7 +41,8 @@ def load_polygons(label_path, W, H, class_ids=None):
         )
         if len(pts) >= 3:
             polys.append(pts)
-    return polys
+            abs_indices.append(abs_idx)
+    return polys, abs_indices
 
 
 def smooth_polygon(pts, epsilon):
@@ -334,7 +337,7 @@ def render(image_path, label_path, output_path, args,
     H, W = img.shape[:2]
 
     # ── Phase 1 ──────────────────────────────────────────────────────────
-    raw_polys = load_polygons(label_path, W, H, class_ids)
+    raw_polys, poly_abs_idx = load_polygons(label_path, W, H, class_ids)
     polys = [smooth_polygon(p, epsilon) for p in raw_polys]
     print(f"  {len(polys)}개 폴리곤 파싱 (epsilon={epsilon})")
 
@@ -473,12 +476,16 @@ def render(image_path, label_path, output_path, args,
         verdict = g['verdict']
         desc_base = f"G{gid} {verdict}"
 
+        def abs_ids(rel_list):
+            """상대 폴리곤 인덱스 → 절대 JSON shapes[] 인덱스 변환."""
+            return sorted(poly_abs_idx[i] for i in rel_list)
+
         if not g['H']:
             # RAAMEN_CENTER: V 폴리곤만 있는 중앙 영역 그룹
             for vi in g['V']:
                 shapes.append(_shape("raamen_center",
                                      [[float(p[0]), float(p[1])] for p in polys[vi]],
-                                     gid, desc_base))
+                                     gid, f"{desc_base} shape#{poly_abs_idx[vi]}"))
             continue
 
         det = group_detail(g, polys, W)
@@ -486,7 +493,7 @@ def render(image_path, label_path, output_path, args,
         # 주 빔 (largest H)
         shapes.append(_shape("raamen_beam",
                              _merge_poly_hull([det['main_h']], polys),
-                             gid, f"{desc_base} beam"))
+                             gid, f"{desc_base} beam shape#{poly_abs_idx[det['main_h']]}"))
 
         # 잡 H 폴리곤 클러스터 (브라켓 등 부속)
         if det['junk_h']:
@@ -494,19 +501,19 @@ def render(image_path, label_path, output_path, args,
             for jc in junk_clusters:
                 shapes.append(_shape("raamen_beam_sub",
                                      _merge_poly_hull(jc, polys),
-                                     gid, f"{desc_base} beam_sub({sorted(jc)})"))
+                                     gid, f"{desc_base} beam_sub{abs_ids(jc)}"))
 
         # 유효 기둥 클러스터 (끝단)
         for pi, cluster in enumerate(det['valid_pole_clusters'], 1):
             shapes.append(_shape("raamen_pole",
                                  _merge_poly_hull(cluster, polys),
-                                 gid, f"{desc_base} pole{pi}({sorted(cluster)})"))
+                                 gid, f"{desc_base} pole{pi}{abs_ids(cluster)}"))
 
         # 중앙 부속물 클러스터 (기둥 아님)
         for cluster in det['attach_clusters']:
             shapes.append(_shape("raamen_pole_attach",
                                  _merge_poly_hull(cluster, polys),
-                                 gid, f"{desc_base} attach({sorted(cluster)})"))
+                                 gid, f"{desc_base} attach{abs_ids(cluster)}"))
 
     anylabel_json = {
         "version": "3.3.9",
