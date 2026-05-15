@@ -296,11 +296,11 @@ def draw_detections(image_bgr: np.ndarray, buckets: list,
             label = f"{prefix}{seq:03d} {score:.2f}"
             (tw, th), _ = cv2.getTextSize(label, font, font_sc, thickness)
             tx, ty = cx - tw // 2, cy + th // 2
-            # 배경 박스
+            # 배경 박스는 검정, 텍스트는 흰색으로 변경
             cv2.rectangle(vis, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
                           (0, 0, 0), -1)
             cv2.putText(vis, label, (tx, ty), font, font_sc,
-                        color, thickness, cv2.LINE_AA)
+                        (255, 255, 255), thickness, cv2.LINE_AA)
 
     # 범례
     lx, ly = W - 280, 20
@@ -331,6 +331,7 @@ def main():
     ap.add_argument("--conf",       type=float, default=0.20,   help="SAM3 신뢰도 임계값 (기본: 0.20)")
     ap.add_argument("--workers",    type=int,   default=4,      help="병렬 스레드 수 (기본: 4)")
     ap.add_argument("--save-labels", action="store_true",      help="YOLO 폴리곤 포맷 .txt 라벨 파일 저장")
+    ap.add_argument("--save-json",   action="store_true",      help="AnyLabeling JSON 포맷 저장 (railway.json 동일 양식)")
     args = ap.parse_args()
 
     img_path  = Path(args.input)
@@ -431,6 +432,35 @@ def main():
                     coords = " ".join(f"{x:.6f} {y:.6f}" for x, y in pts_norm)
                     f.write(f"{cls_idx} {coords}\n")
         print(f"라벨 저장: {label_path}")
+
+    if args.save_json:
+        import json as _json
+        json_shapes = []
+        for cls_idx, shapes in enumerate(buckets):
+            cat_name = categories[cls_idx]["name"] if cls_idx < len(categories) else str(cls_idx)
+            for s in shapes:
+                json_shapes.append({
+                    "label": cat_name,
+                    "score": float(s.get("score", 0.0)),
+                    "points": [[float(px), float(py)] for px, py in s["points"]],
+                    "group_id": None,
+                    "description": None,
+                    "shape_type": "polygon",
+                    "flags": None,
+                })
+        anylabel = {
+            "version": "3.3.9",
+            "flags": {},
+            "shapes": json_shapes,
+            "imagePath": img_path.name,
+            "imageData": None,
+            "imageHeight": H,
+            "imageWidth": W,
+        }
+        json_path = out_path.with_suffix(".json")
+        json_path.write_text(_json.dumps(anylabel, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+        print(f"JSON 저장: {json_path}")
 
 
 if __name__ == "__main__":
