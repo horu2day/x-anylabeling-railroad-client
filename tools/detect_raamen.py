@@ -170,26 +170,76 @@ def connectivity_groups(polys, orients, margin=30):
 
 # ── Phase 4: 라멘 구조 판정 ─────────────────────────────────────────────
 
-def judge_raamen(group, polys, W, center_ratio=0.2):
+def _cluster_polys(indices, polys, margin=60):
     """
-    라멘 구조 판정. H는 리스트 (같은 빔의 여러 폴리곤).
+    인접 폴리곤을 클러스터링 → 물리적 객체(기둥) 단위 반환.
+    Returns: list of [idx, ...] clusters
+    """
+    if not indices:
+        return []
+    n = len(indices)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    bboxes = [(polys[i][:, 0].min(), polys[i][:, 1].min(),
+               polys[i][:, 0].max(), polys[i][:, 1].max()) for i in indices]
+    for a in range(n):
+        ax0, ay0, ax1, ay1 = bboxes[a]
+        for b in range(a + 1, n):
+            bx0, by0, bx1, by1 = bboxes[b]
+            if (ax1 + margin >= bx0 and bx1 + margin >= ax0 and
+                    ay1 + margin >= by0 and by1 + margin >= ay0):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+
+    from collections import defaultdict
+    clusters = defaultdict(list)
+    for i in range(n):
+        clusters[find(i)].append(indices[i])
+    return list(clusters.values())
+
+
+def judge_raamen(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
+    """
+    라멘 구조 판정.
+    - 빔 기준: 그룹 내 가장 큰 H 폴리곤
+    - 기둥 수: V 폴리곤을 근접 클러스터링한 클러스터 수
+    - 빔 x 범위(±50%) 밖의 V 클러스터는 잡폴리곤으로 무시
     Returns: ('RAAMEN' | 'RAAMEN_OCCLUDED' | 'PARTIAL' | '', n_poles)
     """
     hs, vs = group['H'], group['V']
     if not hs:
         return '', 0
-    # 빔 전체 bbox
-    all_h_pts = np.vstack([polys[i] for i in hs])
-    hx0 = int(all_h_pts[:, 0].min()); hx1 = int(all_h_pts[:, 0].max())
+
+    # 가장 큰 H 폴리곤을 빔 기준으로 사용 (잡 H 폴리곤 무시)
+    main_h = max(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)))
+    pts_h = polys[main_h]
+    hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
     hcx = (hx0 + hx1) / 2.0
     is_center = abs(hcx - W / 2) < W * center_ratio
     span = hx1 - hx0
-    n_poles = len(vs)
+
+    # V 폴리곤 클러스터링 → 기둥 단위
+    pole_clusters = _cluster_polys(vs, polys, margin=v_cluster_margin)
+
+    # 빔 x 범위(±50%) 안에 있는 클러스터만 유효 기둥으로 인정
+    x_tol = max(span * 0.5, 50)
+    valid_cxs = []
+    for cluster in pole_clusters:
+        ccx = float(np.mean([polys[i][:, 0].mean() for i in cluster]))
+        if hx0 - x_tol <= ccx <= hx1 + x_tol:
+            valid_cxs.append(ccx)
+
+    n_poles = len(valid_cxs)
 
     if n_poles >= 2:
-        vs_by_x = sorted(vs, key=lambda i: float(polys[i][:, 0].mean()))
-        lcx = float(polys[vs_by_x[0]][:, 0].mean())
-        rcx = float(polys[vs_by_x[-1]][:, 0].mean())
+        lcx, rcx = min(valid_cxs), max(valid_cxs)
         if lcx <= hx0 + span * 0.4 and rcx >= hx1 - span * 0.4:
             return 'RAAMEN', n_poles
         return 'PARTIAL', n_poles
