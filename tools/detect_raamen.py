@@ -228,12 +228,16 @@ def judge_raamen(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
     # V 폴리곤 클러스터링 → 기둥 단위
     pole_clusters = _cluster_polys(vs, polys, margin=v_cluster_margin)
 
-    # 빔 x 범위(±50%) 안에 있는 클러스터만 유효 기둥으로 인정
+    # 기둥은 빔 양 끝단(좌 35% / 우 35%)에만 존재. 중앙부 클러스터는 부속물로 제외.
     x_tol = max(span * 0.5, 50)
+    left_zone  = hx0 + span * 0.35   # 좌끝단 경계
+    right_zone = hx1 - span * 0.35   # 우끝단 경계
     valid_cxs = []
     for cluster in pole_clusters:
         ccx = float(np.mean([polys[i][:, 0].mean() for i in cluster]))
-        if hx0 - x_tol <= ccx <= hx1 + x_tol:
+        in_range = hx0 - x_tol <= ccx <= hx1 + x_tol
+        in_end_zone = ccx <= left_zone or ccx >= right_zone
+        if in_range and in_end_zone:
             valid_cxs.append(ccx)
 
     n_poles = len(valid_cxs)
