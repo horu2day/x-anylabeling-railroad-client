@@ -110,9 +110,34 @@ def compute_vanishing_point(polys):
     return float(vp[0]), float(vp[1])
 
 
+def _estimate_vp_iterative(polys, seed_indices, v_thresh, h_max_diff, vp_min_len, max_iter=6):
+    """초기 후보에서 반복 정제 VP 추정. Returns (vp_x, vp_y, n_v, orients, adiffs)."""
+    n = len(polys)
+    orients = ['?'] * n
+    adiffs  = [90.0] * n
+    if len(seed_indices) < 2:
+        return None, None, 0, orients, adiffs
+    vp_x, vp_y = compute_vanishing_point([polys[i] for i in seed_indices])
+    for _ in range(max_iter):
+        for i, pts in enumerate(polys):
+            orients[i], adiffs[i] = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
+        v_cands = [i for i in range(n)
+                   if orients[i] == 'V' and _long_axis_angle(polys[i])[3] > vp_min_len]
+        if len(v_cands) < 3:
+            break
+        nx, ny = compute_vanishing_point([polys[i] for i in v_cands])
+        shift = ((nx - vp_x) ** 2 + (ny - vp_y) ** 2) ** 0.5
+        vp_x, vp_y = nx, ny
+        if shift < 5.0:
+            for i, pts in enumerate(polys):
+                orients[i], adiffs[i] = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
+            break
+    return vp_x, vp_y, orients.count('V'), orients, adiffs
+
+
 # ── Phase 2: 동적 V/H 분류 ──────────────────────────────────────────────
 
-def classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff=60.0):
+def classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff=75.0):
     """
     소실점 기준 V/H 분류.
     - diff < v_thresh  → V (기둥)
@@ -254,10 +279,16 @@ def judge_raamen(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
                 return 'RAAMEN_CENTER', len(vs)
         return '', 0
 
-    # 가장 큰 H 폴리곤을 빔 기준으로 사용 (잡 H 폴리곤 무시)
-    main_h = max(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)))
-    pts_h = polys[main_h]
-    hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
+    # 큰 H 폴리곤 최대 2개를 빔 기준으로 사용 (2nd가 1st 면적의 50% 이상이면 포함)
+    h_by_area = sorted(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)), reverse=True)
+    main_hs = [h_by_area[0]]
+    if len(h_by_area) > 1:
+        a0 = cv2.contourArea(polys[h_by_area[0]].astype(np.int32))
+        a1 = cv2.contourArea(polys[h_by_area[1]].astype(np.int32))
+        if a1 >= a0 * 0.5:
+            main_hs.append(h_by_area[1])
+    hx0 = int(min(polys[i][:, 0].min() for i in main_hs))
+    hx1 = int(max(polys[i][:, 0].max() for i in main_hs))
     hcx = (hx0 + hx1) / 2.0
     is_center = abs(hcx - W / 2) < W * center_ratio
     span = hx1 - hx0
@@ -307,11 +338,18 @@ def group_detail(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
     if not hs:
         return {'main_h': None, 'junk_h': [], 'valid_pole_clusters': [], 'attach_clusters': []}
 
-    main_h = max(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)))
-    junk_h = [i for i in hs if i != main_h]
+    h_by_area = sorted(hs, key=lambda i: cv2.contourArea(polys[i].astype(np.int32)), reverse=True)
+    main_hs = [h_by_area[0]]
+    if len(h_by_area) > 1:
+        a0 = cv2.contourArea(polys[h_by_area[0]].astype(np.int32))
+        a1 = cv2.contourArea(polys[h_by_area[1]].astype(np.int32))
+        if a1 >= a0 * 0.5:
+            main_hs.append(h_by_area[1])
+    main_h = main_hs[0]  # JSON 출력용 대표 빔
+    junk_h = [i for i in hs if i not in main_hs]
 
-    pts_h = polys[main_h]
-    hx0 = int(pts_h[:, 0].min()); hx1 = int(pts_h[:, 0].max())
+    hx0 = int(min(polys[i][:, 0].min() for i in main_hs))
+    hx1 = int(max(polys[i][:, 0].max() for i in main_hs))
     span = hx1 - hx0
 
     pole_clusters = _cluster_polys(vs, polys, margin=v_cluster_margin)
@@ -331,6 +369,7 @@ def group_detail(group, polys, W, center_ratio=0.2, v_cluster_margin=60):
 
     return {
         'main_h': main_h,
+        'main_hs': main_hs,
         'junk_h': junk_h,
         'valid_pole_clusters': valid_pole_clusters,
         'attach_clusters': attach_clusters,
@@ -356,7 +395,7 @@ _RAAMEN_COLOR = {
 
 def render(image_path, label_path, output_path, args,
            class_ids=None, class_names=None, epsilon=4.0, v_thresh=20.0,
-           h_max_diff=60.0, vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
+           h_max_diff=75.0, vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
 
     buf = np.fromfile(str(image_path), dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -369,46 +408,46 @@ def render(image_path, label_path, output_path, args,
 
     img_cx, img_cy = W / 2.0, H / 2.0
 
-    # VP 후보: 외곽 + 고세장비 + 충분한 길이 + radial cos_sim > 0.5
-    vp_cands = []
+    # ── Phase 1+2: 두 가지 VP 시드 방식으로 시도 → V 폴리곤이 더 많은 VP 채택 ──
+    elong_idx = []
     for i, pts in enumerate(polys):
-        _, cx, cy, long_side, short_side = _long_axis_angle(pts)
-        ar = long_side / short_side if short_side > 0 else 0
+        la, cx, cy, long_side, short_side = _long_axis_angle(pts)
+        if short_side > 0 and long_side / short_side > vp_min_ar and long_side > vp_min_len:
+            elong_idx.append(i)
+
+    # 시드 A: 지배적 장축 각도 클러스터 (이미지 방향 비의존)
+    seeds_A = []
+    if len(elong_idx) >= 2:
+        avals_all = [(i, _long_axis_angle(polys[i])[0] % 180.0) for i in elong_idx]
+        hist, edges = np.histogram([a for _, a in avals_all], bins=12, range=(0.0, 180.0))
+        pk = int(np.argmax(hist))
+        peak_c = (edges[pk] + edges[pk + 1]) / 2.0
+        seeds_A = [i for i, a in avals_all
+                   if min(abs(a - peak_c), 180.0 - abs(a - peak_c)) < 20.0]
+
+    # 시드 B: radial cos_sim (이미지 중심 방사 방향 정렬)
+    seeds_B = []
+    for i in elong_idx:
+        _, cx, cy, _, _ = _long_axis_angle(polys[i])
         dist = ((cx - img_cx) ** 2 + (cy - img_cy) ** 2) ** 0.5
-        cos_sim = _radial_cos_sim(pts, img_cx, img_cy)
-        if (ar > vp_min_ar
-                and long_side > vp_min_len
-                and dist > min(W, H) * vp_outer_ratio
-                and cos_sim > 0.5):
-            vp_cands.append(i)
-    print(f"  VP 후보: {len(vp_cands)}개 (indices: {vp_cands})")
+        if dist > min(W, H) * vp_outer_ratio and _radial_cos_sim(polys[i], img_cx, img_cy) > 0.5:
+            seeds_B.append(i)
 
-    if len(vp_cands) >= 2:
-        vp_x, vp_y = compute_vanishing_point([polys[i] for i in vp_cands])
-        print(f"  소실점: ({vp_x:.1f}, {vp_y:.1f})")
-    else:
-        # 후보 부족 → 이미지 중앙 위쪽 먼 지점으로 fallback
-        vp_x, vp_y = img_cx, -H * 3.0
-        print(f"  VP 후보 부족 → fallback VP ({vp_x:.1f}, {vp_y:.1f})")
-
-    # ── Phase 2: 1차 분류 ────────────────────────────────────────────────
-    orients, adiffs = [], []
-    for i, pts in enumerate(polys):
-        orient, adiff = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
-        orients.append(orient)
-        adiffs.append(adiff)
-
-    # VP 정제: H 빔 오염 제거 — 1차 V 폴리곤만 사용하여 VP 재계산
-    v_for_refine = [i for i in range(len(polys))
-                    if orients[i] == 'V' and _long_axis_angle(polys[i])[3] > vp_min_len]
-    if len(v_for_refine) >= 3:
-        vp_x2, vp_y2 = compute_vanishing_point([polys[i] for i in v_for_refine])
-        print(f"  VP 정제: ({vp_x2:.1f}, {vp_y2:.1f})  ({len(v_for_refine)}개 V폴리곤 사용)")
-        vp_x, vp_y = vp_x2, vp_y2
-        for i, pts in enumerate(polys):
-            orient, adiff = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
-            orients[i] = orient
-            adiffs[i] = adiff
+    # 두 시드 모두 시도 → V가 더 많이 나오는 VP 채택
+    best_vp_x, best_vp_y = img_cx, -H * 3.0
+    best_n_v = 0
+    orients, adiffs = ['?'] * len(polys), [90.0] * len(polys)
+    for label, seeds in [('지배각', seeds_A), ('radial', seeds_B)]:
+        if len(seeds) < 2:
+            continue
+        vx, vy, nv, ors, ads = _estimate_vp_iterative(
+            polys, seeds, v_thresh, h_max_diff, vp_min_len)
+        print(f"  VP [{label}]: ({vx:.0f}, {vy:.0f})  V={nv}")
+        if nv > best_n_v:
+            best_vp_x, best_vp_y, best_n_v = vx, vy, nv
+            orients, adiffs = ors, ads
+    vp_x, vp_y = best_vp_x, best_vp_y
+    print(f"  → 채택 VP: ({vp_x:.1f}, {vp_y:.1f})")
 
     print(f"\n  [V/H 분류] threshold=±{v_thresh}°  h_max=±{h_max_diff}°")
     for i in range(len(polys)):
@@ -458,8 +497,8 @@ def render(image_path, label_path, output_path, args,
         cv2.putText(img, lbl, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 4)
         cv2.putText(img, lbl, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
-    # 2. VP 후보 폴리곤에 청록 테두리
-    for i in vp_cands:
+    # 2. VP 시드 폴리곤에 청록 테두리 (채택된 시드셋 재구성)
+    for i in seeds_A + [i for i in seeds_B if i not in seeds_A]:
         cv2.polylines(img, [polys[i].astype(np.int32)], True, (0, 220, 220), 3)
 
     # 3. 소실점 표시 (이미지 내부: 원, 외부: 방향 화살표)
@@ -530,10 +569,12 @@ def render(image_path, label_path, output_path, args,
 
         det = group_detail(g, polys, W)
 
-        # 주 빔 (largest H)
-        shapes.append(_shape("raamen_beam",
-                             _merge_poly_hull([det['main_h']], polys),
-                             gid, f"{desc_base} beam shape#{poly_abs_idx[det['main_h']]}"))
+        # 주 빔 (1~2개: 면적 기준 상위, 2nd ≥ 50% 조건 충족 시 포함)
+        for bi, mh in enumerate(det['main_hs'], 1):
+            label = "raamen_beam" if bi == 1 else "raamen_beam2"
+            shapes.append(_shape(label,
+                                 _merge_poly_hull([mh], polys),
+                                 gid, f"{desc_base} beam{bi} shape#{poly_abs_idx[mh]}"))
 
         # 잡 H 폴리곤 클러스터 (브라켓 등 부속)
         if det['junk_h']:
@@ -583,8 +624,8 @@ def main():
                     help="approxPolyDP epsilon (기본 4.0px)")
     ap.add_argument("--v-thresh",   type=float, default=20.0,
                     help="V/H 분류 각도 임계값 degrees (기본 20°)")
-    ap.add_argument("--h-max-diff", type=float, default=60.0,
-                    help="H(빔) 최대 각도 diff; 이 이상은 레일/전선 등으로 제외 (기본 60°)")
+    ap.add_argument("--h-max-diff", type=float, default=75.0,
+                    help="H(빔) 최대 각도 diff; 이 이상은 레일/전선 등으로 제외 (기본 75°)")
     ap.add_argument("--margin",         type=int,   default=30,
                     help="폴리곤 접촉 판정 margin px (기본 30)")
     ap.add_argument("--min-group-area", type=float, default=0,
