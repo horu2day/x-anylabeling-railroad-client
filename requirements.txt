@@ -49,6 +49,8 @@ requests>=2.32
 huggingface_hub>=1.3.5
 
 # === OCR / VL Models ===
+paddleocr>=3.0.2
+paddlepaddle>=2.6.0
 qwen-vl-utils>=0.0.14
 
 # === GUI (also used by server for x-anylabeling-cvhub) ===

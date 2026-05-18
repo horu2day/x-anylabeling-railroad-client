@@ -21,12 +21,31 @@ from pathlib import Path
 
 # ── Phase 1: 파싱 + 단순화 + 소실점 ─────────────────────────────────────
 
-def load_polygons(label_path, W, H, class_ids=None):
-    """YOLO .txt 라벨 → (픽셀 좌표 폴리곤 리스트, 절대 라인 인덱스 리스트).
-    절대 라인 인덱스 = AnyLabeling JSON shapes[] 배열의 절대 인덱스와 동일.
+def load_polygons(label_path, W, H, class_ids=None, class_names=None):
     """
+    AnyLabeling JSON 또는 YOLO .txt 자동 감지 후 파싱.
+    Returns: (픽셀 좌표 폴리곤 리스트, 절대 shapes[] 인덱스 리스트)
+    절대 인덱스는 AnyLabeling JSON shapes[] 배열 인덱스와 동일.
+    """
+    import json as _json
     if not label_path.exists():
         raise FileNotFoundError(f"라벨 파일을 찾을 수 없습니다: {label_path}")
+
+    if label_path.suffix.lower() == ".json":
+        data = _json.loads(label_path.read_text(encoding="utf-8"))
+        shapes = data.get("shapes", [])
+        polys, abs_indices = [], []
+        for abs_idx, s in enumerate(shapes):
+            if class_names is not None and s.get("label", "") not in class_names:
+                continue
+            pts = np.array([[float(p[0]), float(p[1])] for p in s.get("points", [])],
+                           dtype=np.float32)
+            if len(pts) >= 3:
+                polys.append(pts)
+                abs_indices.append(abs_idx)
+        return polys, abs_indices
+
+    # YOLO .txt
     polys, abs_indices = [], []
     for abs_idx, line in enumerate(label_path.read_text(encoding="utf-8").splitlines()):
         parts = line.split()
@@ -93,9 +112,12 @@ def compute_vanishing_point(polys):
 
 # ── Phase 2: 동적 V/H 분류 ──────────────────────────────────────────────
 
-def classify_vh(pts, vp_x, vp_y, v_thresh):
+def classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff=60.0):
     """
     소실점 기준 V/H 분류.
+    - diff < v_thresh  → V (기둥)
+    - v_thresh ≤ diff < h_max_diff → H (빔)
+    - diff ≥ h_max_diff → '?' (레일/전선 등 비라멘 수평 구조물)
     Returns: (orient, angle_diff_deg)
       orient = 'V' | 'H' | '?'
     """
@@ -108,7 +130,11 @@ def classify_vh(pts, vp_x, vp_y, v_thresh):
     diff = abs(long_angle_deg - exp_angle) % 180.0
     if diff > 90.0:
         diff = 180.0 - diff
-    return ('V' if diff < v_thresh else 'H'), diff
+    if diff < v_thresh:
+        return 'V', diff
+    if diff < h_max_diff:
+        return 'H', diff
+    return '?', diff
 
 
 # ── Phase 3: 폴리곤 접촉/교차 기반 그룹핑 ───────────────────────────────
@@ -329,15 +355,15 @@ _RAAMEN_COLOR = {
 # ── 메인 렌더링 ─────────────────────────────────────────────────────────
 
 def render(image_path, label_path, output_path, args,
-           class_ids=None, epsilon=4.0, v_thresh=20.0,
-           vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
+           class_ids=None, class_names=None, epsilon=4.0, v_thresh=20.0,
+           h_max_diff=60.0, vp_min_ar=2.5, vp_min_len=80.0, vp_outer_ratio=0.2):
 
     buf = np.fromfile(str(image_path), dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     H, W = img.shape[:2]
 
     # ── Phase 1 ──────────────────────────────────────────────────────────
-    raw_polys, poly_abs_idx = load_polygons(label_path, W, H, class_ids)
+    raw_polys, poly_abs_idx = load_polygons(label_path, W, H, class_ids, class_names)
     polys = [smooth_polygon(p, epsilon) for p in raw_polys]
     print(f"  {len(polys)}개 폴리곤 파싱 (epsilon={epsilon})")
 
@@ -365,14 +391,28 @@ def render(image_path, label_path, output_path, args,
         vp_x, vp_y = img_cx, -H * 3.0
         print(f"  VP 후보 부족 → fallback VP ({vp_x:.1f}, {vp_y:.1f})")
 
-    # ── Phase 2 ──────────────────────────────────────────────────────────
-    print(f"\n  [V/H 분류] threshold=±{v_thresh}°")
+    # ── Phase 2: 1차 분류 ────────────────────────────────────────────────
     orients, adiffs = [], []
     for i, pts in enumerate(polys):
-        orient, adiff = classify_vh(pts, vp_x, vp_y, v_thresh)
+        orient, adiff = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
         orients.append(orient)
         adiffs.append(adiff)
-        print(f"    poly {i:>2d}: {orient}  diff={adiff:.1f}°")
+
+    # VP 정제: H 빔 오염 제거 — 1차 V 폴리곤만 사용하여 VP 재계산
+    v_for_refine = [i for i in range(len(polys))
+                    if orients[i] == 'V' and _long_axis_angle(polys[i])[3] > vp_min_len]
+    if len(v_for_refine) >= 3:
+        vp_x2, vp_y2 = compute_vanishing_point([polys[i] for i in v_for_refine])
+        print(f"  VP 정제: ({vp_x2:.1f}, {vp_y2:.1f})  ({len(v_for_refine)}개 V폴리곤 사용)")
+        vp_x, vp_y = vp_x2, vp_y2
+        for i, pts in enumerate(polys):
+            orient, adiff = classify_vh(pts, vp_x, vp_y, v_thresh, h_max_diff)
+            orients[i] = orient
+            adiffs[i] = adiff
+
+    print(f"\n  [V/H 분류] threshold=±{v_thresh}°  h_max=±{h_max_diff}°")
+    for i in range(len(polys)):
+        print(f"    poly {i:>2d}: {orients[i]}  diff={adiffs[i]:.1f}°")
     print(f"  V:{orients.count('V')}  H:{orients.count('H')}  ?:{orients.count('?')}")
 
     # ── Phase 3 ──────────────────────────────────────────────────────────
@@ -535,12 +575,16 @@ def main():
     ap.add_argument("--image",      required=True)
     ap.add_argument("--label",      required=True)
     ap.add_argument("--output",     required=True)
-    ap.add_argument("--class-ids",  default="1",
-                    help="포함할 클래스 ID, 콤마 구분 (기본: '1')")
+    ap.add_argument("--class-ids",  default="",
+                    help="포함할 클래스 ID, 콤마 구분 (.txt 전용)")
+    ap.add_argument("--class-names", default="catenary_pole",
+                    help="포함할 클래스 이름, 콤마 구분 (.json 전용, 기본: 'catenary_pole')")
     ap.add_argument("--epsilon",    type=float, default=4.0,
                     help="approxPolyDP epsilon (기본 4.0px)")
     ap.add_argument("--v-thresh",   type=float, default=20.0,
                     help="V/H 분류 각도 임계값 degrees (기본 20°)")
+    ap.add_argument("--h-max-diff", type=float, default=60.0,
+                    help="H(빔) 최대 각도 diff; 이 이상은 레일/전선 등으로 제외 (기본 60°)")
     ap.add_argument("--margin",         type=int,   default=30,
                     help="폴리곤 접촉 판정 margin px (기본 30)")
     ap.add_argument("--min-group-area", type=float, default=0,
@@ -549,8 +593,12 @@ def main():
 
     class_ids = ({int(x) for x in args.class_ids.split(',') if x.strip()}
                  if args.class_ids else None)
+    class_names = ({x.strip() for x in args.class_names.split(',') if x.strip()}
+                   if args.class_names else None)
     render(Path(args.image), Path(args.label), Path(args.output), args,
-           class_ids=class_ids, epsilon=args.epsilon, v_thresh=args.v_thresh)
+           class_ids=class_ids, class_names=class_names,
+           epsilon=args.epsilon, v_thresh=args.v_thresh,
+           h_max_diff=args.h_max_diff)
 
 
 if __name__ == "__main__":

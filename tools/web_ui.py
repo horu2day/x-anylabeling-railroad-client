@@ -124,6 +124,7 @@ async def api_detect(data: dict):
             "--overlap",    str(data.get("overlap", 0.20)),
             "--conf",       str(data.get("conf", 0.20)),
             "--workers",    str(data.get("workers", 8)),
+            "--save-labels"
         ]
         if data.get("debug"):
             cmd.append("--debug")
